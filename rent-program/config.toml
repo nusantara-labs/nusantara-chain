@@ -1,0 +1,4 @@
+[rent]
+lamports_per_byte_year = 3480
+exemption_threshold = 2
+burn_percent = 50

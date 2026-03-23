@@ -1,0 +1,4 @@
+[pool]
+max_size = 50_000
+expiry_slot_window = 150
+max_txs_per_account = 64

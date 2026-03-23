@@ -1,0 +1,131 @@
+[workspace]
+resolver = "3"
+members = [
+    "crypto",
+    "core",
+    "system-program",
+    "rent-program",
+    "compute-budget-program",
+    "sysvar-program",
+    "stake-program",
+    "vote-program",
+    "storage",
+    "consensus",
+    "runtime",
+    "genesis",
+    "validator",
+    "gossip",
+    "turbine",
+    "tpu-forward",
+    "rpc",
+    "cli",
+    "vm",
+    "loader-program",
+    "sdk",
+    "sdk-macro",
+    "token-program",
+    "mempool",
+    "e2e-tests",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+# WASM VM
+wasmi = "0.42"
+wat = "1.245"
+lru = "0.12"
+
+# External
+sha3 = "0.10"
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+base64 = "0.22"
+borsh = { version = "1", features = ["derive"] }
+thiserror = "2"
+rand = "0.9"
+zeroize = { version = "1", features = ["derive"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+rocksdb = "0.23"
+tempfile = "3"
+reed-solomon-erasure = "6.0"
+zstd = "0.13"
+
+# Networking
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# GPU compute
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+# Concurrency
+dashmap = "6"
+parking_lot = "0.12"
+rayon = "1.10"
+
+# Config & CLI (only used by genesis/validator crates)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+
+# Web / RPC
+axum = { version = "0.8", features = ["http2", "ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+dirs = "6"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+
+# Proc-macro support (for sdk-macro)
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+# Internal
+nusantara-crypto = { path = "crypto" }
+nusantara-core = { path = "core" }
+nusantara-rent-program = { path = "rent-program" }
+nusantara-compute-budget-program = { path = "compute-budget-program" }
+nusantara-sysvar-program = { path = "sysvar-program" }
+nusantara-system-program = { path = "system-program" }
+nusantara-stake-program = { path = "stake-program" }
+nusantara-vote-program = { path = "vote-program" }
+nusantara-storage = { path = "storage" }
+nusantara-consensus = { path = "consensus" }
+nusantara-runtime = { path = "runtime" }
+nusantara-genesis = { path = "genesis" }
+nusantara-gossip = { path = "gossip" }
+nusantara-turbine = { path = "turbine" }
+nusantara-tpu-forward = { path = "tpu-forward" }
+nusantara-rpc = { path = "rpc" }
+nusantara-cli = { path = "cli" }
+nusantara-vm = { path = "vm" }
+nusantara-loader-program = { path = "loader-program" }
+nusantara-sdk = { path = "sdk" }
+nusantara-sdk-macro = { path = "sdk-macro" }
+nusantara-token-program = { path = "token-program" }
+nusantara-mempool = { path = "mempool" }
+nusantara-e2e-tests = { path = "e2e-tests" }
+anyhow = "1"

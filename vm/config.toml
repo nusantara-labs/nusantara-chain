@@ -1,0 +1,20 @@
+[wasm]
+max_bytecode_size = 524_288
+max_memory_pages = 64
+max_call_stack_depth = 256
+max_cpi_depth = 4
+max_return_data_size = 1024
+max_log_message_size = 10_000
+program_cache_capacity = 256
+
+[cost]
+instantiation = 10_000
+memory_page = 1_000
+syscall_base = 100
+account_data_read_base = 100
+account_data_write_base = 200
+sha3_512_base = 300
+signature_verify = 2_000
+cpi_base = 1_000
+log_base = 100
+create_program_address = 1_500

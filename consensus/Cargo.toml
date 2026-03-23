@@ -1,0 +1,49 @@
+[package]
+name = "nusantara-consensus"
+description = "Consensus engine for the Nusantara blockchain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-vote-program.workspace = true
+nusantara-stake-program.workspace = true
+nusantara-sysvar-program.workspace = true
+nusantara-storage.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+sha3.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "poh_bench"
+harness = false
+
+[[bench]]
+name = "tower_bench"
+harness = false
+
+[[bench]]
+name = "fork_choice_bench"
+harness = false
+
+[[bench]]
+name = "leader_schedule_bench"
+harness = false
+
+[[bench]]
+name = "rewards_bench"
+harness = false

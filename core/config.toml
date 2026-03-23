@@ -1,0 +1,24 @@
+[token]
+lamports_per_nusa = 1_000_000_000
+token_name = "NUSA"
+
+[timing]
+slots_per_epoch = 432_000
+slot_duration_ms = 400
+leader_schedule_slot_offset = 432_000
+
+[fee]
+lamports_per_signature = 5000
+
+[account]
+max_data_size = 10_485_760
+
+[programs]
+system = "system_program"
+rent = "rent_program"
+stake = "stake_program"
+vote = "vote_program"
+compute_budget = "compute_budget_program"
+sysvar = "sysvar_program"
+loader = "loader_program"
+token = "token_program"

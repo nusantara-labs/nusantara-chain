@@ -1,0 +1,29 @@
+# Build
+/target
+*.pdb
+
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.iml
+.vscode/
+.idea/
+
+# Rust tooling
+**/*.rs.bk
+
+# Environment & secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Local data
+/data/
+/ledger/
+*.db
+*.log
+

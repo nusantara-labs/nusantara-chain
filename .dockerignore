@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.gitignore
+.dockerignore
+.rtk/
+.claude/
+guide/
+examples/
+monitoring/
+*.md
+Dockerfile
+docker-compose.yml

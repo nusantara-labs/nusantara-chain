@@ -1,0 +1,2301 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["nusantara", "blockchain"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(nusantara_current_slot, instance)",
+        "query": "label_values(nusantara_current_slot, instance)",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": "$__all" },
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Nusantara Blockchain",
+  "uid": "nusantara-main",
+  "panels": [
+    {
+      "id": 100,
+      "title": "Overview",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "title": "Current Slot",
+      "description": "Latest slot processed by the validator",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_current_slot{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Root Slot",
+      "description": "Latest finalized (rooted) slot",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_root_slot{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Slot Lag",
+      "description": "Difference between current slot and root slot. High lag indicates finalization delay.",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_current_slot{instance=~\"$instance\"} - nusantara_root_slot{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 5, "color": "yellow" },
+              { "value": 20, "color": "red" }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Gossip Peers",
+      "description": "Number of connected gossip peers",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_gossip_peers{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "red" },
+              { "value": 1, "color": "yellow" },
+              { "value": 3, "color": "green" }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Mempool Size",
+      "description": "Current number of transactions in the mempool",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_mempool_size{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 1000, "color": "yellow" },
+              { "value": 5000, "color": "red" }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "title": "Total Supply (NUSA)",
+      "description": "Total token supply in NUSA (lamports / 1e9)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_bank_total_supply{instance=~\"$instance\"} / 1e9",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "title": "WS Connections",
+      "description": "Active WebSocket connections to the RPC server",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_rpc_ws_active_connections{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 8,
+      "title": "Consecutive Skips",
+      "description": "Number of consecutive slots this validator has skipped as leader",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_consecutive_skips{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 1, "color": "yellow" },
+              { "value": 4, "color": "red" }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 9,
+      "title": "Blocks Produced / s",
+      "description": "Rate of blocks produced by this validator",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(nusantara_blocks_produced_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "blocks/s {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+          "unit": "ops",
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Block Time (ms) — p50 / p95 / p99",
+      "description": "Block production time histogram quantiles. Target: < 400ms slot time.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.50, rate(nusantara_block_time_ms_bucket{instance=~\"$instance\"}[1m]))",
+          "legendFormat": "p50 {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, rate(nusantara_block_time_ms_bucket{instance=~\"$instance\"}[1m]))",
+          "legendFormat": "p95 {{instance}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, rate(nusantara_block_time_ms_bucket{instance=~\"$instance\"}[1m]))",
+          "legendFormat": "p99 {{instance}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }, { "value": 400, "color": "red" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Transactions / Slot",
+      "description": "Number of transactions included in each produced slot",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "nusantara_transactions_per_slot{instance=~\"$instance\"}",
+          "legendFormat": "txs/slot {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Skip Rate",
+      "description": "Rate of leader slot skips and skip ratio over 5m window",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(nusantara_leader_skips_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "skips/s {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(nusantara_leader_skips_total{instance=~\"$instance\"}[5m]) / (rate(nusantara_leader_slots_total{instance=~\"$instance\"}[5m]) + rate(nusantara_leader_skips_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "skip ratio {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+      }
+    },
+
+    {
+      "id": 200,
+      "title": "Consensus & PoH",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "panels": [
+        {
+          "id": 13,
+          "title": "PoH Hash Rate",
+          "description": "Rate of SHA3 hash iterations in the Proof of History chain",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_poh_hash_iterations_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "hash/s {{instance}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 14,
+          "title": "PoH Records / Ticks / Slots",
+          "description": "Rate of PoH records, ticks, and slot completions",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_poh_records_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "records/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_poh_ticks_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "ticks/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_poh_slots_produced_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "slots/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 15,
+          "title": "Tower Votes & Roots",
+          "description": "Rate of Tower BFT vote processing and root advancement",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tower_votes_processed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "votes/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tower_roots_advanced_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "roots/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 16,
+          "title": "Fork Tree & Commitment",
+          "description": "Fork choice tree state and commitment levels",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_fork_tree_node_count{instance=~\"$instance\"}",
+              "legendFormat": "fork nodes",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_fork_tree_best_slot{instance=~\"$instance\"}",
+              "legendFormat": "best slot",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_fork_tree_root_slot{instance=~\"$instance\"}",
+              "legendFormat": "root slot",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_commitment_highest_confirmed{instance=~\"$instance\"}",
+              "legendFormat": "confirmed",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_commitment_highest_finalized{instance=~\"$instance\"}",
+              "legendFormat": "finalized",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 17,
+          "title": "GPU Verification & Leader Schedule",
+          "description": "GPU PoH verification activity and leader schedule computations",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gpu_poh_entries_verified_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "GPU entries verified/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gpu_verifier_initialized_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "GPU init/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_leader_schedule_computed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "schedules computed/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 18,
+          "title": "Bank Frozen & Rewards",
+          "description": "Bank slot freezing and reward distribution metrics",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_bank_slots_frozen_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "frozen/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_rewards_total_distributed{instance=~\"$instance\"} / 1e9",
+              "legendFormat": "rewards (NUSA)",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rewards_epochs_calculated_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "epoch calcs/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 300,
+      "title": "Block Production & Replay",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "panels": [
+        {
+          "id": 19,
+          "title": "Blocks Produced vs Replayed",
+          "description": "Rate of block production, replay, and vote processing",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_blocks_produced_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "produced/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_blocks_replayed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "replayed/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_replay_blocks_processed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "replay processed/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 20,
+          "title": "Leader Slots vs Skips",
+          "description": "Leader slot assignments, skips, and non-leader slots (stacked)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_leader_slots_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "leader slots/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_leader_skips_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "skips/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_non_leader_slots_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "non-leader/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" }, "stacking": { "mode": "normal" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 21,
+          "title": "Orphan Block Buffer",
+          "description": "Orphan block queue size and lifecycle events",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_orphan_queue_size{instance=~\"$instance\"}",
+              "legendFormat": "queue size",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_orphan_blocks_buffered_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "buffered/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_orphan_blocks_replayed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "replayed/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_orphan_blocks_pruned_below_root_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pruned/s",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_orphan_evictions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "evicted/s",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 22,
+          "title": "Fork Switches & Block Discards",
+          "description": "Fork switch events and reasons for block discards",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_fork_switches_completed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "switches completed/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_fork_switch_failures_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "switch failures/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_blocks_discarded_parent_pruned_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "parent pruned/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_blocks_discarded_mismatch_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "mismatch/s",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_blocks_deleted_verification_failure_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "verification fail/s",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 23,
+          "title": "Root & Snapshot Management",
+          "description": "Root slot progression and snapshot operations",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_root_slot{instance=~\"$instance\"}",
+              "legendFormat": "root slot",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_root_advancement_deferred_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "deferred/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_snapshots_fetched_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "snapshots fetched/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_snapshot_failures_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "snapshot failures/s",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 400,
+      "title": "Runtime & Execution",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "panels": [
+        {
+          "id": 24,
+          "title": "Transaction Throughput",
+          "description": "Executed vs failed transactions per second (stacked, failed in red)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_transactions_executed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "executed/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_transactions_failed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "failed/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" }, "stacking": { "mode": "normal" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "failed/s" },
+                "properties": [
+                  { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 25,
+          "title": "Compute Units & Fees",
+          "description": "Compute units consumed and fees collected per second",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_compute_units_consumed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "compute/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_slot_fees_collected_total{instance=~\"$instance\"}[1m]) / 1e9",
+              "legendFormat": "fees (NUSA/s)",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 26,
+          "title": "Parallel Execution",
+          "description": "Parallel executor metrics: batches, transactions, compute, and fees",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_parallel_batches_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "batches/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_parallel_slot_transactions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "parallel txs/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_parallel_slot_compute_consumed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "parallel compute/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_parallel_slot_fees_collected_total{instance=~\"$instance\"}[1m]) / 1e9",
+              "legendFormat": "parallel fees (NUSA/s)",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 27,
+          "title": "VM Executions",
+          "description": "Virtual machine execution rate, compute consumed, and log messages",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_vm_executions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "executions/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_vm_compute_consumed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "compute/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_vm_log_messages_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "log messages/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 28,
+          "title": "Slot-Level Runtime",
+          "description": "Per-slot runtime transaction and compute totals",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_slot_transactions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "slot txs/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_runtime_slot_compute_consumed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "slot compute/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 500,
+      "title": "Network — Gossip",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "panels": [
+        {
+          "id": 29,
+          "title": "Gossip Messages Received / s",
+          "description": "Total gossip protocol messages received per second",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_messages_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "msgs/s {{instance}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 30,
+          "title": "Push vs Pull Traffic",
+          "description": "Gossip push messages, pull requests/responses sent and received",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_push_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "push rx/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_requests_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull req rx/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_responses_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull resp rx/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_requests_sent_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull req tx/s",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 31,
+          "title": "CRDS Operations",
+          "description": "CRDS table inserts, purges, and pull values received",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_crds_inserts_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "inserts/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_crds_purged_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "purged/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_values_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull values/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 32,
+          "title": "Gossip Errors",
+          "description": "All gossip protocol error counters: invalid signatures, rate limits, prune errors",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_invalid_signature_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "invalid sig",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_invalid_signature_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull invalid sig",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_prune_invalid_signature_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "prune invalid sig",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_unverifiable_value_dropped_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "unverifiable dropped",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_rate_limited_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "rate limited",
+              "refId": "E"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pull_response_truncated_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pull truncated",
+              "refId": "F"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_prune_messages_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "prune msgs",
+              "refId": "G"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 33,
+          "title": "Ping / Pong Details",
+          "description": "Ping/pong verification failures, expired pongs, and unsolicited pongs",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pong_verification_failed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pong verify fail",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pong_expired_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pong expired",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_pong_unsolicited_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pong unsolicited",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_ping_invalid_signature_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "ping invalid sig",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 600,
+      "title": "Network — Turbine",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "panels": [
+        {
+          "id": 34,
+          "title": "Shreds Created vs Received",
+          "description": "Rate of shreds created by shredder vs received from network",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shreds_created_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "created/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shreds_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "received/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 35,
+          "title": "Broadcast & Retransmit",
+          "description": "Turbine broadcast, retransmit, and block assembly rates",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_broadcast_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "broadcast/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_retransmit_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "retransmit/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_blocks_assembled_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "assembled/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 36,
+          "title": "Shred Errors",
+          "description": "Rejected shreds: unknown leader, invalid signatures, max index, duplicate, slot evictions",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shreds_unknown_leader_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "unknown leader",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_invalid_shred_signatures_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "invalid sig",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shreds_rejected_max_index_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "max index",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shreds_skipped_already_stored_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "already stored",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_shred_collector_slots_evicted_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "slots evicted",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 37,
+          "title": "Repair Service",
+          "description": "Repair requests, responses, shreds received, and cache hit/miss rates",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_repair_requests_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "requests/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_repair_responses_sent_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "responses/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_repair_shreds_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "shreds rx/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_repair_cache_hits_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "cache hits/s",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_turbine_repair_cache_misses_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "cache misses/s",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 38,
+          "title": "Shreds Per Broadcast — p50 / p95 / p99",
+          "description": "Histogram quantiles for the number of shreds per broadcast event",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "histogram_quantile(0.50, rate(nusantara_turbine_shreds_per_broadcast_bucket{instance=~\"$instance\"}[1m]))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "histogram_quantile(0.95, rate(nusantara_turbine_shreds_per_broadcast_bucket{instance=~\"$instance\"}[1m]))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "histogram_quantile(0.99, rate(nusantara_turbine_shreds_per_broadcast_bucket{instance=~\"$instance\"}[1m]))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 700,
+      "title": "Network — TPU Forward",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "panels": [
+        {
+          "id": 39,
+          "title": "TPU Transactions Received / s",
+          "description": "Rate of transactions received by the QUIC TPU server",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_transactions_received_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "txs rx/s {{instance}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 40,
+          "title": "Forwarding: Local vs Remote",
+          "description": "Transaction forwarding: local (leader=self), remote (QUIC to leader), sent messages (stacked)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_local_forward_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "local/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_remote_forward_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "remote/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_forward_messages_sent_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "msgs sent/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" }, "stacking": { "mode": "normal" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 41,
+          "title": "TPU Errors & Rate Limiting",
+          "description": "TPU error counters: rate limiting, invalid transactions, signature failures, connection rejects, no-leader drops, forward errors",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_rate_limited_per_ip_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "rate limit/IP",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_rate_limited_global_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "rate limit/global",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_invalid_transactions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "invalid tx",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_signature_failures_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "sig failures",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_connections_rejected_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "conn rejected",
+              "refId": "E"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_no_leader_drops_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "no leader drops",
+              "refId": "F"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_tpu_forward_errors_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "forward errors",
+              "refId": "G"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 800,
+      "title": "Mempool",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
+      "panels": [
+        {
+          "id": 42,
+          "title": "Mempool Size",
+          "description": "Current mempool depth with capacity thresholds",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_mempool_size{instance=~\"$instance\"}",
+              "legendFormat": "size {{instance}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 20, "lineWidth": 2, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "green" },
+                  { "value": 1000, "color": "yellow" },
+                  { "value": 5000, "color": "red" }
+                ]
+              },
+              "custom.thresholdsStyle": { "mode": "line" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 43,
+          "title": "Insert vs Drain Rate",
+          "description": "Rate of transactions inserted into and drained from the mempool",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_inserts_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "inserts/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_drains_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "drains/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 44,
+          "title": "Rejections & Evictions",
+          "description": "Mempool rejection reasons: duplicates, account limits, full pool, evictions, expired (stacked)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_duplicates_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "duplicates",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_account_limit_rejected_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "account limit",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_rejected_full_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "pool full",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_evictions_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "evictions",
+              "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_mempool_expired_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "expired",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" }, "stacking": { "mode": "normal" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 900,
+      "title": "RPC & WebSocket",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "panels": [
+        {
+          "id": 45,
+          "title": "RPC Requests / s by Endpoint",
+          "description": "REST API request rate broken down by endpoint label (stacked)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 21 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_requests_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "{{endpoint}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" }, "stacking": { "mode": "normal" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 46,
+          "title": "JSON-RPC Metrics",
+          "description": "JSON-RPC request rate, batch requests, and transaction submissions",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 21 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_jsonrpc_requests_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "jsonrpc/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_jsonrpc_batch_requests_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "batch/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_jsonrpc_transactions_submitted_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "jsonrpc txs/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 47,
+          "title": "JSON-RPC Batch Size — p50 / p95",
+          "description": "Histogram quantiles for JSON-RPC batch request sizes",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 21 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "histogram_quantile(0.50, rate(nusantara_rpc_jsonrpc_batch_size_bucket{instance=~\"$instance\"}[1m]))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "histogram_quantile(0.95, rate(nusantara_rpc_jsonrpc_batch_size_bucket{instance=~\"$instance\"}[1m]))",
+              "legendFormat": "p95",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 48,
+          "title": "WebSocket Activity",
+          "description": "WebSocket connections, upgrades, events sent, and lagged events",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_rpc_ws_active_connections{instance=~\"$instance\"}",
+              "legendFormat": "active connections",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_ws_upgrades_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "upgrades/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_ws_events_sent_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "events/s",
+              "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_ws_events_lagged_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "lagged/s",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 49,
+          "title": "RPC Submissions & Downloads",
+          "description": "Transaction submissions via REST, airdrops, and snapshot downloads",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_transactions_submitted_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "txs submitted/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_airdrops_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "airdrops/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_rpc_snapshot_downloads_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "snapshots/s",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 1000,
+      "title": "Staking & Economics",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "panels": [
+        {
+          "id": 50,
+          "title": "Stake & Validators",
+          "description": "Total active stake (in NUSA) and number of staked validators",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_bank_total_active_stake{instance=~\"$instance\"} / 1e9",
+              "legendFormat": "active stake (NUSA)",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_bank_epoch_stake_validators{instance=~\"$instance\"}",
+              "legendFormat": "validators",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 51,
+          "title": "Voting & Rewards",
+          "description": "Vote submission rate, gossip vote processing, and total rewards distributed",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_votes_submitted_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "votes/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_gossip_votes_processed_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "gossip votes/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_rewards_total_distributed{instance=~\"$instance\"} / 1e9",
+              "legendFormat": "rewards (NUSA)",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 52,
+          "title": "Slashing Events",
+          "description": "Double vote detections, slashing penalties applied, and total lamports slashed",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_slashing_double_votes_detected_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "double votes/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_slashing_penalties_applied_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "penalties/s",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_slashing_total_slashed_lamports_total{instance=~\"$instance\"}[1m]) / 1e9",
+              "legendFormat": "slashed (NUSA/s)",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 1100,
+      "title": "Storage",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "panels": [
+        {
+          "id": 53,
+          "title": "State Tree",
+          "description": "State tree leaf counts from consensus and validator subsystems",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_state_tree_leaf_count{instance=~\"$instance\"}",
+              "legendFormat": "consensus leaves",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "nusantara_state_tree_leaves{instance=~\"$instance\"}",
+              "legendFormat": "validator leaves",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        },
+        {
+          "id": 54,
+          "title": "Owner Index Operations",
+          "description": "Rate of owner index updates and removals in storage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_storage_owner_index_updates_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "updates/s",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+              "expr": "rate(nusantara_storage_owner_index_removals_total{instance=~\"$instance\"}[1m])",
+              "legendFormat": "removals/s",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 10, "lineWidth": 1, "spanNulls": false, "drawStyle": "line", "lineInterpolation": "smooth", "showPoints": "never", "axisBorderShow": false, "scaleDistribution": { "type": "linear" } },
+              "unit": "ops",
+              "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+[package]
+name = "nusantara-turbine"
+description = "Shred-based block propagation with erasure coding for Nusantara"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-storage.workspace = true
+nusantara-consensus.workspace = true
+nusantara-gossip.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+reed-solomon-erasure.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,3 @@
+[stake]
+warmup_cooldown_rate_bps = 2500
+min_delegation = 1_000_000_000

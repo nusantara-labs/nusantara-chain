@@ -1,0 +1,22 @@
+[package]
+name = "nusantara-genesis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-rent-program.workspace = true
+nusantara-sysvar-program.workspace = true
+nusantara-stake-program.workspace = true
+nusantara-vote-program.workspace = true
+nusantara-storage.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

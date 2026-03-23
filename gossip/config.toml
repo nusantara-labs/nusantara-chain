@@ -1,0 +1,9 @@
+[gossip]
+push_interval_ms = 100
+pull_interval_ms = 5000
+push_fanout = 6
+purge_timeout_ms = 30000
+ping_cache_ttl_ms = 60000
+max_crds_values_per_push = 10
+max_pull_response_values = 20
+recv_rate_limit_per_ip_per_sec = 10240

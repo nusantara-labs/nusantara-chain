@@ -1,0 +1,14 @@
+[package]
+name = "nusantara-loader-program"
+description = "Program loader for WASM smart contracts on the Nusantara blockchain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

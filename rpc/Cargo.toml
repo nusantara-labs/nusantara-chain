@@ -1,0 +1,41 @@
+[package]
+name = "nusantara-rpc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-storage.workspace = true
+nusantara-consensus.workspace = true
+nusantara-system-program.workspace = true
+nusantara-compute-budget-program.workspace = true
+nusantara-stake-program.workspace = true
+nusantara-vote-program.workspace = true
+nusantara-sysvar-program.workspace = true
+nusantara-loader-program.workspace = true
+nusantara-gossip.workspace = true
+nusantara-mempool.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+base64.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+hyper-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

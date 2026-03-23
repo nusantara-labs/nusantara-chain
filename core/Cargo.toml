@@ -1,0 +1,13 @@
+[package]
+name = "nusantara-core"
+description = "Core data structures for the Nusantara blockchain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+nusantara-crypto.workspace = true

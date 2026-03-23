@@ -1,0 +1,31 @@
+[package]
+name = "nusantara-e2e-tests"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "nusantara_e2e_tests"
+
+[[bin]]
+name = "tps-bench"
+path = "src/bin/tps_bench.rs"
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-system-program.workspace = true
+nusantara-compute-budget-program.workspace = true
+borsh.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+rand.workspace = true
+anyhow = "1"
+tokio-tungstenite.workspace = true
+futures-util.workspace = true

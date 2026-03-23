@@ -1,0 +1,9 @@
+[tpu]
+max_connections_per_ip = 8
+max_tx_per_second_per_ip = 100
+max_tx_per_second_global = 50000
+max_transaction_size = 65536
+forward_batch_size = 64
+forward_interval_ms = 10
+quic_max_concurrent_streams = 1024
+max_concurrent_connections = 1024

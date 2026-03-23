@@ -1,0 +1,22 @@
+[package]
+name = "nusantara-storage"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-sysvar-program.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+rocksdb.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "storage_bench"
+harness = false

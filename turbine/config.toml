@@ -1,0 +1,8 @@
+[turbine]
+fanout = 32
+max_data_per_shred = 1228
+fec_rate_percent = 33
+repair_interval_ms = 200
+max_shreds_per_slot = 32768
+max_repair_batch_request = 256
+max_shreds_per_repair_response = 14

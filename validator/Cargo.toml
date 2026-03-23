@@ -1,0 +1,42 @@
+[package]
+name = "nusantara-validator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-storage.workspace = true
+nusantara-consensus.workspace = true
+nusantara-runtime.workspace = true
+nusantara-genesis.workspace = true
+nusantara-rent-program.workspace = true
+nusantara-sysvar-program.workspace = true
+nusantara-stake-program.workspace = true
+nusantara-vote-program.workspace = true
+nusantara-gossip.workspace = true
+nusantara-turbine.workspace = true
+nusantara-tpu-forward.workspace = true
+nusantara-rpc.workspace = true
+nusantara-mempool.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+clap.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+lru.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "nusantara-sdk"
+description = "SDK for writing Nusantara smart contracts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-sdk-macro.workspace = true
+borsh.workspace = true
+
+# SHA3 is needed for native PDA derivation (in WASM, the syscall is used instead)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sha3.workspace = true
+
+[features]
+default = []

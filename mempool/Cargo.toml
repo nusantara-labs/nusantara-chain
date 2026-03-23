@@ -1,0 +1,18 @@
+[package]
+name = "nusantara-mempool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-compute-budget-program.workspace = true
+nusantara-runtime.workspace = true
+parking_lot.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+nusantara-system-program.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "nusantara-tpu-forward"
+description = "QUIC-based transaction ingress and leader forwarding for Nusantara"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-gossip.workspace = true
+nusantara-consensus.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,5 @@
+[rocksdb]
+write_buffer_size_mb = 128
+max_background_jobs = 4
+bloom_filter_bits = 10
+block_cache_size_mb = 512

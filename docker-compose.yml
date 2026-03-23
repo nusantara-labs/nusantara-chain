@@ -1,0 +1,154 @@
+x-validator: &validator-defaults
+  build: .
+  networks:
+    - nusantara
+
+services:
+  genesis-init:
+    <<: *validator-defaults
+    container_name: nusantara-genesis-init
+    environment:
+      - INIT_ONLY=true
+      - LEDGER_PATH=/genesis/ledger
+    volumes:
+      - genesis-data:/genesis
+
+  validator-1:
+    <<: *validator-defaults
+    container_name: nusantara-validator-1
+    depends_on:
+      genesis-init:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=debug
+      - IS_BOOTSTRAP=true
+      - VALIDATOR_NUM=1
+      - GENESIS_LEDGER=/genesis/ledger
+    command:
+      - "--ledger-path=/data/ledger"
+      - "--genesis-config=/etc/nusantara/genesis.toml"
+      - "--gossip-addr=0.0.0.0:8000"
+      - "--rpc-addr=0.0.0.0:8899"
+      - "--metrics-addr=0.0.0.0:9090"
+      - "--enable-faucet"
+      - "--hashes-per-tick=1"
+      - "--max-ledger-slots=10000"
+      - "--public-host=validator-1"
+      - "--entrypoints=validator-2:8000"
+      - "--entrypoints=validator-3:8000"
+    ports:
+      - "8899:8899"
+      - "9090:9090"
+    volumes:
+      - validator1-data:/data
+      - genesis-data:/genesis:ro
+
+  validator-2:
+    <<: *validator-defaults
+    container_name: nusantara-validator-2
+    depends_on:
+      genesis-init:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=debug
+      - IS_BOOTSTRAP=false
+      - VALIDATOR_NUM=2
+      - GENESIS_LEDGER=/genesis/ledger
+    command:
+      - "--ledger-path=/data/ledger"
+      - "--genesis-config=/etc/nusantara/genesis.toml"
+      - "--gossip-addr=0.0.0.0:8000"
+      - "--rpc-addr=0.0.0.0:8899"
+      - "--metrics-addr=0.0.0.0:9090"
+      - "--enable-faucet"
+      - "--hashes-per-tick=1"
+      - "--max-ledger-slots=10000"
+      - "--public-host=validator-2"
+      - "--entrypoints=validator-1:8000"
+      - "--entrypoints=validator-3:8000"
+    ports:
+      - "8900:8899"
+      - "9091:9090"
+    volumes:
+      - validator2-data:/data
+      - genesis-data:/genesis:ro
+
+  validator-3:
+    <<: *validator-defaults
+    container_name: nusantara-validator-3
+    depends_on:
+      genesis-init:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=debug
+      - IS_BOOTSTRAP=false
+      - VALIDATOR_NUM=3
+      - GENESIS_LEDGER=/genesis/ledger
+    command:
+      - "--ledger-path=/data/ledger"
+      - "--genesis-config=/etc/nusantara/genesis.toml"
+      - "--gossip-addr=0.0.0.0:8000"
+      - "--rpc-addr=0.0.0.0:8899"
+      - "--metrics-addr=0.0.0.0:9090"
+      - "--enable-faucet"
+      - "--hashes-per-tick=1"
+      - "--max-ledger-slots=10000"
+      - "--public-host=validator-3"
+      - "--entrypoints=validator-1:8000"
+      - "--entrypoints=validator-2:8000"
+    ports:
+      - "8901:8899"
+      - "9092:9090"
+    volumes:
+      - validator3-data:/data
+      - genesis-data:/genesis:ro
+
+  nginx:
+    image: nginx:alpine
+    container_name: nusantara-nginx
+    volumes:
+      - ./monitoring/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - validator-1
+      - validator-2
+      - validator-3
+    networks:
+      - nusantara
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nusantara-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9093:9090"
+    networks:
+      - nusantara
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nusantara-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=nusantara
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - nusantara
+
+volumes:
+  genesis-data:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+
+networks:
+  nusantara:
+    driver: bridge

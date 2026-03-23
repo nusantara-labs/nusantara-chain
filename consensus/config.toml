@@ -1,0 +1,27 @@
+[poh]
+hashes_per_tick = 12_500
+ticks_per_slot = 64
+target_tick_duration_us = 14_062
+
+[tower]
+vote_threshold_depth = 8
+vote_threshold_percentage = 66
+switch_threshold_percentage = 38
+max_lockout_history = 31
+
+[leader_schedule]
+num_consecutive_leader_slots = 4
+
+[fork_choice]
+max_unconfirmed_depth = 64
+duplicate_threshold_percentage = 52
+
+[commitment]
+optimistic_confirmation_threshold = 66
+supermajority_threshold = 66
+
+[rewards]
+partition_count = 4_096
+initial_inflation_rate_bps = 800
+terminal_inflation_rate_bps = 150
+taper_rate_bps = 1_500

@@ -1,0 +1,41 @@
+[package]
+name = "nusantara-runtime"
+description = "Transaction execution engine for the Nusantara blockchain"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-utils = ["dep:tempfile"]
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+nusantara-system-program.workspace = true
+nusantara-rent-program.workspace = true
+nusantara-compute-budget-program.workspace = true
+nusantara-sysvar-program.workspace = true
+nusantara-stake-program.workspace = true
+nusantara-vote-program.workspace = true
+nusantara-storage.workspace = true
+nusantara-vm.workspace = true
+nusantara-loader-program.workspace = true
+nusantara-token-program.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+rayon.workspace = true
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "runtime_bench"
+harness = false
+
+[[bench]]
+name = "transaction_bench"
+harness = false

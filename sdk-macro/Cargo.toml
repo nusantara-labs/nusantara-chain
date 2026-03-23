@@ -1,0 +1,13 @@
+[package]
+name = "nusantara-sdk-macro"
+description = "Procedural macros for Nusantara smart contract SDK"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

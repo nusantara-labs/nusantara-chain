@@ -1,0 +1,3 @@
+[vote]
+max_lockout_history = 31
+max_epoch_credits_history = 64

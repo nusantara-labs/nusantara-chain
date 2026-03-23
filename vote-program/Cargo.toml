@@ -1,0 +1,11 @@
+[package]
+name = "nusantara-vote-program"
+description = "Vote program for the Nusantara blockchain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nusantara-crypto.workspace = true
+nusantara-core.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
