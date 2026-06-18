@@ -16,10 +16,12 @@ pub fn sha3_512(data: &[u8]) -> Hash {
 
 /// Calculate the compute-unit cost for a SHA3-512 operation.
 ///
-/// The cost scales linearly with input size: a base charge plus one unit per
-/// 64 bytes of input (one SHA3 block).
+/// The cost scales with input size: a base charge plus one unit per 64-byte
+/// block of input (rounded up), plus an additional `+1` to cover the final
+/// padding block that SHA3 always processes. This avoids the previous
+/// undercharge where 63 bytes of input cost the same as 0 bytes.
 pub fn sha3_512_cost(data_len: usize) -> u64 {
-    COST_SHA3_512_BASE + (data_len as u64 / 64)
+    COST_SHA3_512_BASE + (data_len as u64).div_ceil(64) + 1
 }
 
 /// Verify a Dilithium3 detached signature.
@@ -93,11 +95,14 @@ mod tests {
 
     #[test]
     fn cost_calculation() {
-        assert_eq!(sha3_512_cost(0), COST_SHA3_512_BASE);
-        assert_eq!(sha3_512_cost(64), COST_SHA3_512_BASE + 1);
-        assert_eq!(sha3_512_cost(128), COST_SHA3_512_BASE + 2);
-        // Truncated division: 63 bytes => 0 extra blocks
-        assert_eq!(sha3_512_cost(63), COST_SHA3_512_BASE);
+        // Base + div_ceil(0/64) + 1 = base + 0 + 1
+        assert_eq!(sha3_512_cost(0), COST_SHA3_512_BASE + 1);
+        // Base + div_ceil(64/64) + 1 = base + 1 + 1
+        assert_eq!(sha3_512_cost(64), COST_SHA3_512_BASE + 2);
+        // Base + div_ceil(128/64) + 1 = base + 2 + 1
+        assert_eq!(sha3_512_cost(128), COST_SHA3_512_BASE + 3);
+        // C1 fix: 63 bytes now costs div_ceil(63/64)=1 block, not 0.
+        assert_eq!(sha3_512_cost(63), COST_SHA3_512_BASE + 2);
     }
 
     #[test]

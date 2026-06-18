@@ -51,6 +51,13 @@ pub fn get_account_data(
 /// The account must be marked writable in `privileges`, the calling program
 /// must own the account, and the write range must fit within the existing
 /// data allocation. Only the owning program may modify an account's data.
+///
+/// ## Note (A2)
+///
+/// This function does not check rent-exemption after writing. If the write
+/// reduces account data or increases it beyond its current allocation, the
+/// runtime is responsible for enforcing rent-exemption rules before committing
+/// the state change.
 pub fn set_account_data(
     account_idx: usize,
     offset: usize,
@@ -112,6 +119,12 @@ pub fn get_lamports(account_idx: usize, accounts: &[(Hash, Account)]) -> Result<
 /// balance) require that the calling program owns the account. Credits
 /// (increasing or maintaining the balance) are allowed from any program,
 /// following the Solana authorization model.
+///
+/// ## Note (A1)
+///
+/// `calling_program_id` is trusted to be the actual executing program's ID.
+/// The runtime must pass the correct callee program_id during CPI dispatch;
+/// the VM cannot independently verify the caller's identity.
 pub fn set_lamports(
     account_idx: usize,
     lamports: u64,

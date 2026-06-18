@@ -134,10 +134,12 @@ impl<'a> VmHostState<'a> {
     /// Deduct `units` from the remaining compute budget.
     ///
     /// Returns [`VmError::ComputeExceeded`] if there are not enough units
-    /// remaining, in which case the budget is set to zero.
+    /// remaining. On error the budget is **not** modified; the caller decides
+    /// whether to abort the transaction (at which point the budget state is
+    /// irrelevant). This prevents a double-charge if the error is somehow
+    /// caught and execution continues.
     pub fn consume_compute(&mut self, units: u64) -> Result<(), VmError> {
         if units > self.compute_remaining {
-            self.compute_remaining = 0;
             return Err(VmError::ComputeExceeded);
         }
         self.compute_remaining -= units;
@@ -215,7 +217,8 @@ mod tests {
 
         let err = state.consume_compute(101).unwrap_err();
         assert!(matches!(err, VmError::ComputeExceeded));
-        assert_eq!(state.compute_remaining, 0);
+        // H1: budget must NOT be zeroed on error; it remains unchanged.
+        assert_eq!(state.compute_remaining, 100);
     }
 
     #[test]

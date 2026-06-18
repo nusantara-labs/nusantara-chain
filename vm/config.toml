@@ -6,6 +6,13 @@ max_cpi_depth = 4
 max_return_data_size = 1024
 max_log_message_size = 10_000
 program_cache_capacity = 256
+max_functions = 10_000
+max_tables = 1
+max_table_elements = 1_024
+max_globals = 256
+max_imports = 64
+max_custom_section_bytes = 32_768
+max_cpi_signers = 16
 
 [cost]
 instantiation = 10_000

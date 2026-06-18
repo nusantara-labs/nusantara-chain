@@ -3,6 +3,21 @@
 //! All values are parsed from `config.toml` at build time via `build.rs`.
 //! The build script emits `NUSA_*` environment variables which are read
 //! here with `env!()` and converted to typed constants using const-fn parsers.
+//!
+//! ## Tuning
+//!
+//! Edit `config.toml` in this crate's root. All values are unsigned integers;
+//! underscores in numbers are stripped by the build script. The entire crate
+//! must be rebuilt (`cargo build -p nusantara-vm`) for changes to take effect.
+//!
+//! ## Categories
+//!
+//! - **WASM limits**: structural validation caps (size, pages, counts).
+//! - **Compute-unit costs**: metering charges for each operation category.
+//!
+//! Constants in this module are intentionally conservative. Production
+//! deployments may increase limits after benchmarking, but decreasing them
+//! (especially compute costs) could allow compute-budget exhaustion attacks.
 
 /// Parse a `u64` from a string at compile time.
 /// Assumes the string contains only ASCII digits (no signs, no separators).
@@ -18,8 +33,14 @@ const fn const_parse_u64(s: &str) -> u64 {
 }
 
 /// Parse a `u32` from a string at compile time.
+///
+/// # Panics (compile-time)
+///
+/// Panics if the value exceeds `u32::MAX`.
 const fn const_parse_u32(s: &str) -> u32 {
-    const_parse_u64(s) as u32
+    let val = const_parse_u64(s);
+    assert!(val <= u32::MAX as u64, "config value exceeds u32::MAX");
+    val as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +71,27 @@ pub const MAX_LOG_MESSAGE_SIZE: usize =
 /// Number of compiled modules the LRU program cache holds (default: 256).
 pub const PROGRAM_CACHE_CAPACITY: usize =
     const_parse_u64(env!("NUSA_WASM_PROGRAM_CACHE_CAPACITY")) as usize;
+
+/// Maximum number of functions (imported + internal) a module may declare.
+pub const MAX_FUNCTIONS: u32 = const_parse_u32(env!("NUSA_WASM_MAX_FUNCTIONS"));
+
+/// Maximum number of tables a module may declare.
+pub const MAX_TABLES: u32 = const_parse_u32(env!("NUSA_WASM_MAX_TABLES"));
+
+/// Maximum total number of elements across all tables.
+pub const MAX_TABLE_ELEMENTS: u32 = const_parse_u32(env!("NUSA_WASM_MAX_TABLE_ELEMENTS"));
+
+/// Maximum number of global variables a module may declare.
+pub const MAX_GLOBALS: u32 = const_parse_u32(env!("NUSA_WASM_MAX_GLOBALS"));
+
+/// Maximum number of imports a module may declare.
+pub const MAX_IMPORTS: u32 = const_parse_u32(env!("NUSA_WASM_MAX_IMPORTS"));
+
+/// Maximum cumulative size of all custom sections in bytes.
+pub const MAX_CUSTOM_SECTION_BYTES: u32 = const_parse_u32(env!("NUSA_WASM_MAX_CUSTOM_SECTION_BYTES"));
+
+/// Maximum number of PDA signer seed sets per `invoke_signed` call.
+pub const MAX_CPI_SIGNERS: u32 = const_parse_u32(env!("NUSA_WASM_MAX_CPI_SIGNERS"));
 
 // ---------------------------------------------------------------------------
 // Compute-unit costs
@@ -101,6 +143,12 @@ mod tests {
         assert_eq!(MAX_RETURN_DATA_SIZE, 1024);
         assert_eq!(MAX_LOG_MESSAGE_SIZE, 10_000);
         assert_eq!(PROGRAM_CACHE_CAPACITY, 256);
+        assert_eq!(MAX_FUNCTIONS, 10_000);
+        assert_eq!(MAX_TABLES, 1);
+        assert_eq!(MAX_TABLE_ELEMENTS, 1_024);
+        assert_eq!(MAX_GLOBALS, 256);
+        assert_eq!(MAX_IMPORTS, 64);
+        assert_eq!(MAX_CUSTOM_SECTION_BYTES, 32_768);
     }
 
     #[test]

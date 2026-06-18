@@ -25,7 +25,9 @@ fn parse_toml_flat(content: &str) -> HashMap<String, String> {
             section = line[1..line.len() - 1].trim().to_string();
         } else if let Some((k, v)) = line.split_once('=') {
             let key = format!("{}_{}", section, k.trim());
-            let raw = v.trim();
+            // Strip inline comments (everything after `#`) before parsing the value.
+            let v_no_comment = v.split_once('#').map(|(v, _)| v).unwrap_or(v);
+            let raw = v_no_comment.trim();
             let val = if raw.starts_with('"') && raw.ends_with('"') {
                 // String value: strip quotes, keep underscores
                 raw[1..raw.len() - 1].to_string()

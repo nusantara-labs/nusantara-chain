@@ -32,7 +32,31 @@ pub enum VmError {
     MissingMemory,
 
     #[error("too many memory pages: {pages} > {max}")]
-    TooManyMemoryPages { pages: u32, max: u32 },
+    TooManyMemoryPages { pages: u64, max: u64 },
+
+    #[error("unbounded memory: module must declare an explicit maximum page count")]
+    UnboundedMemory,
+
+    #[error("too many functions: {count} > {max}")]
+    TooManyFunctions { count: u32, max: u32 },
+
+    #[error("too many tables: {count} > {max}")]
+    TooManyTables { count: u32, max: u32 },
+
+    #[error("too many table elements: {count} > {max}")]
+    TooManyTableElements { count: u32, max: u32 },
+
+    #[error("too many globals: {count} > {max}")]
+    TooManyGlobals { count: u32, max: u32 },
+
+    #[error("too many imports: {count} > {max}")]
+    TooManyImports { count: u32, max: u32 },
+
+    #[error("custom section too large: cumulative {bytes} > {max}")]
+    CustomSectionTooLarge { bytes: u32, max: u32 },
+
+    #[error("unknown import: module={module:?}, name={name:?} is not in the syscall whitelist")]
+    UnknownImport { module: String, name: String },
 
     #[error("has start function (not allowed)")]
     HasStartFunction,

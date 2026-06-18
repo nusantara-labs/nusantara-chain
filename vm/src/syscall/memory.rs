@@ -12,16 +12,31 @@ use crate::error::VmError;
 
 /// Start of the bump-allocator heap in WASM linear memory (3 MiB offset,
 /// after the stack region).
-const HEAP_START: u32 = 0x0030_0000;
+///
+/// The WASM stack occupies `[0, HEAP_START)`. Writing instruction data or
+/// program IDs below this address would corrupt the WASM stack. The executor
+/// must ensure `heap_offset` is initialized to `HEAP_START` (not `0`) before
+/// performing any allocations.
+pub(crate) const HEAP_START: u32 = 0x0030_0000;
 
 /// Total heap size available for bump allocation (1 MiB).
-const HEAP_SIZE: u32 = 0x0010_0000;
+pub(crate) const HEAP_SIZE: u32 = 0x0010_0000;
 
 /// Allocate `size` bytes from the WASM heap.
 ///
 /// Returns the start offset of the allocated region. The `heap_offset`
 /// is advanced past the allocation. Returns [`VmError::HeapExhausted`]
 /// if the allocation would exceed the heap.
+///
+/// ## Sentinel pattern
+///
+/// `heap_offset == 0` is treated as a sentinel meaning "not yet initialized".
+/// On first call the allocator jumps to [`HEAP_START`] before handing out
+/// memory. This allows callers to pass a zero-initialized `u32` without
+/// needing to explicitly call `init_heap()`. The executor initializes
+/// `host_state.heap_offset` to [`HEAP_START`] before writing instruction data
+/// (see E4 fix in `executor.rs`), so the sentinel path is mainly for direct
+/// calls to `heap_alloc` in tests or future CPI sub-executors.
 pub fn heap_alloc(size: u32, heap_offset: &mut u32) -> Result<u32, VmError> {
     let start = if *heap_offset == 0 {
         HEAP_START

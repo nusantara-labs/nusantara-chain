@@ -28,8 +28,13 @@ pub fn set_return_data(
 }
 
 /// Get return data from the most recent invocation (if any).
-pub fn get_return_data(return_data: &Option<(Hash, Vec<u8>)>) -> Option<(Hash, Vec<u8>)> {
-    return_data.clone()
+///
+/// Returns a reference to the stored return data rather than cloning, avoiding
+/// an allocation on each read.
+pub fn get_return_data(return_data: &Option<(Hash, Vec<u8>)>) -> Option<(Hash, &[u8])> {
+    return_data
+        .as_ref()
+        .map(|(program_id, data)| (*program_id, data.as_slice()))
 }
 
 #[cfg(test)]

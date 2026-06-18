@@ -7,8 +7,18 @@
 //! The actual sysvar state is held by the runtime's `SysvarCache` and passed
 //! to the VM via the host state. These types serve as the ABI contract between
 //! the VM and on-chain programs.
+//!
+//! ## Serialization
+//!
+//! All types derive `BorshSerialize` / `BorshDeserialize` for deterministic
+//! binary encoding when writing to WASM linear memory or reading from it.
+//! Note that `nusantara-sysvar-program` defines richer sysvar types with the
+//! same Borsh encoding -- these structs are intentionally leaner ABI views.
+
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Clock sysvar: current slot, epoch, and wall-clock time.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ClockInfo {
     pub slot: u64,
     pub epoch: u64,
@@ -16,6 +26,7 @@ pub struct ClockInfo {
 }
 
 /// Rent sysvar: rent parameters.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RentInfo {
     pub lamports_per_byte_year: u64,
     pub exemption_threshold: u64,
@@ -23,6 +34,7 @@ pub struct RentInfo {
 }
 
 /// Epoch schedule sysvar: epoch sizing.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct EpochScheduleInfo {
     pub slots_per_epoch: u64,
 }
@@ -30,6 +42,7 @@ pub struct EpochScheduleInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::BorshDeserialize;
 
     #[test]
     fn clock_info_construction() {
@@ -61,5 +74,37 @@ mod tests {
             slots_per_epoch: 432_000,
         };
         assert_eq!(info.slots_per_epoch, 432_000);
+    }
+
+    #[test]
+    fn clock_info_borsh_round_trip() {
+        let original = ClockInfo {
+            slot: 99,
+            epoch: 3,
+            unix_timestamp: -1,
+        };
+        let bytes = borsh::to_vec(&original).unwrap();
+        let decoded = ClockInfo::try_from_slice(&bytes).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn rent_info_borsh_round_trip() {
+        let original = RentInfo {
+            lamports_per_byte_year: 3480,
+            exemption_threshold: 2,
+            burn_percent: 50,
+        };
+        let bytes = borsh::to_vec(&original).unwrap();
+        let decoded = RentInfo::try_from_slice(&bytes).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn epoch_schedule_borsh_round_trip() {
+        let original = EpochScheduleInfo { slots_per_epoch: 432_000 };
+        let bytes = borsh::to_vec(&original).unwrap();
+        let decoded = EpochScheduleInfo::try_from_slice(&bytes).unwrap();
+        assert_eq!(original, decoded);
     }
 }

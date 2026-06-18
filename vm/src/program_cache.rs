@@ -35,16 +35,26 @@ use wasmi::{Engine, Module};
 
 use nusantara_crypto::Hash;
 
-use crate::config::PROGRAM_CACHE_CAPACITY;
+use crate::config::{MAX_CALL_STACK_DEPTH, PROGRAM_CACHE_CAPACITY};
+use crate::validate::harden_config;
 
 /// Build the shared wasmi engine configuration.
 ///
-/// Fuel metering is enabled so the executor can enforce compute-unit limits,
-/// and floating-point instructions are disabled (deterministic execution).
+/// All safety-critical settings are applied through [`harden_config`], which is
+/// the single authoritative place for engine hardening. This ensures that the
+/// shared engine and the local validation engine used in `validate_wasm` are
+/// always configured identically.
+///
+/// Stack limits are set here because they affect runtime behavior rather than
+/// module validation.
 fn build_engine() -> Engine {
     let mut config = wasmi::Config::default();
-    config.consume_fuel(true);
-    config.floats(false);
+    harden_config(&mut config);
+    // V5: Wire MAX_CALL_STACK_DEPTH to wasmi's recursion depth limit.
+    // wasmi 1.1 exposes `set_max_recursion_depth` directly on Config.
+    // We use MAX_CALL_STACK_DEPTH as the maximum recursion depth; value-stack
+    // heights are left at wasmi's defaults (sensible for general programs).
+    config.set_max_recursion_depth(MAX_CALL_STACK_DEPTH as usize);
     Engine::new(&config)
 }
 
