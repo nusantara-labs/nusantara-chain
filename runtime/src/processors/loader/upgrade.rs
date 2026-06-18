@@ -111,16 +111,33 @@ pub(super) fn process_upgrade(
 
     {
         let pd = ctx.get_account_mut(program_data_idx)?;
-        let old_bytecode_space = pd.account.data.len() - old_pd_header_len;
+        // old_pd_header_len is the serialised byte length of the previous
+        // ProgramData header; it must be <= the current data length or the
+        // on-chain account is corrupt.
+        let old_bytecode_space = pd
+            .account
+            .data
+            .len()
+            .checked_sub(old_pd_header_len)
+            .ok_or(RuntimeError::InvalidAccountData(
+                "program data account too small for its own header".to_string(),
+            ))?;
         if new_bytecode.len() > old_bytecode_space {
             return Err(RuntimeError::AccountDataTooLarge {
                 size: new_bytecode.len() as u64,
                 limit: old_bytecode_space as u64,
             });
         }
+        // Padding = (old capacity) - (new bytecode length); safe because the
+        // guard above ensures new_bytecode.len() <= old_bytecode_space.
+        let padding = old_bytecode_space
+            .checked_sub(new_bytecode.len())
+            .ok_or(RuntimeError::InvalidAccountData(
+                "bytecode length exceeds allocated space".to_string(),
+            ))?;
         let mut new_data = new_header_bytes;
         new_data.extend_from_slice(&new_bytecode);
-        new_data.resize(new_data.len() + old_bytecode_space - new_bytecode.len(), 0);
+        new_data.resize(new_data.len() + padding, 0);
         pd.account.data = new_data;
     }
 

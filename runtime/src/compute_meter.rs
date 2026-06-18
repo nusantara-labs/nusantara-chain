@@ -40,9 +40,13 @@ impl ComputeMeter {
     }
 
     /// Set remaining compute units directly (for WASM fuel sync).
-    /// Capped at the meter's limit to prevent exceeding the original budget.
+    ///
+    /// The meter is monotonically non-increasing: `remaining` is capped at the
+    /// current `self.remaining` so WASM fuel sync can never increase the budget
+    /// mid-execution. This prevents a crafted WASM module from recovering units
+    /// it has already consumed.
     pub fn set_remaining(&mut self, remaining: u64) {
-        self.remaining = remaining.min(self.limit);
+        self.remaining = remaining.min(self.remaining);
     }
 }
 
@@ -99,10 +103,18 @@ mod tests {
     }
 
     #[test]
-    fn set_remaining_capped_at_limit() {
+    fn set_remaining_monotonically_non_increasing() {
         let mut meter = ComputeMeter::new(1000);
         meter.consume(500).unwrap();
-        meter.set_remaining(2000); // exceeds limit
-        assert_eq!(meter.remaining(), 1000); // capped at limit
+        // Attempting to set a value larger than current remaining is clamped
+        // to current remaining — the meter cannot be refilled mid-execution.
+        meter.set_remaining(2000);
+        assert_eq!(meter.remaining(), 500);
+        // A lower value is accepted (WASM fuel sync reporting fewer units left).
+        meter.set_remaining(300);
+        assert_eq!(meter.remaining(), 300);
+        // Trying to go back up is still clamped.
+        meter.set_remaining(400);
+        assert_eq!(meter.remaining(), 300);
     }
 }

@@ -16,7 +16,14 @@ pub fn parse_compute_budget(message: &Message) -> Result<ComputeBudget, RuntimeE
     let mut loaded_accounts_data_size_limit = None;
 
     for (ix_index, ix) in message.instructions.iter().enumerate() {
-        let program_id = &message.account_keys[ix.program_id_index as usize];
+        let idx = ix.program_id_index as usize;
+        let program_id = message.account_keys.get(idx).ok_or_else(|| {
+            RuntimeError::InvalidInstructionData(format!(
+                "instruction {ix_index}: program_id_index {idx} out of bounds \
+                 (account_keys len {})",
+                message.account_keys.len()
+            ))
+        })?;
         if program_id != &*COMPUTE_BUDGET_PROGRAM_ID {
             continue;
         }

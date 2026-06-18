@@ -21,7 +21,7 @@ pub(super) fn process_initialize_account(
 
     // Verify mint is initialized
     let mint_acc = ctx.get_account(mint_idx)?;
-    let mint = Mint::try_from_slice(&mint_acc.account.data)
+    let mint = Mint::deserialize(&mut mint_acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     if !mint.is_initialized {
         return Err(super::token_err(TokenError::NotInitialized));
@@ -43,7 +43,7 @@ pub(super) fn process_initialize_account(
     // Check not already initialized
     let existing = ctx.get_account(account_idx)?;
     if !existing.account.data.is_empty()
-        && let Ok(ta) = TokenAccount::try_from_slice(&existing.account.data)
+        && let Ok(ta) = TokenAccount::deserialize(&mut existing.account.data.clone().as_slice())
         && ta.state != AccountState::Uninitialized
     {
         return Err(super::token_err(TokenError::AlreadyInitialized));
@@ -88,7 +88,7 @@ pub(super) fn process_close_account(
     let auth_address = *auth.address;
 
     let acc = ctx.get_account(account_idx)?;
-    let token_acc = TokenAccount::try_from_slice(&acc.account.data)
+    let token_acc = TokenAccount::deserialize(&mut acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
 
     // Must be owner or close_authority

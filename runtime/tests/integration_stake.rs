@@ -204,8 +204,7 @@ fn split_stake() {
     let mut sa = Account::new(min_rent + 2_000_000_000, *STAKE_PROGRAM_ID);
     sa.data = vec![0u8; state_size];
     storage.put_account(&stake_acc, 0, &sa).unwrap();
-    let mut sp = Account::new(0, *STAKE_PROGRAM_ID);
-    sp.data = vec![0u8; state_size];
+    let sp = Account::new(0, Hash::zero());
     storage.put_account(&split_acc, 0, &sp).unwrap();
     storage
         .put_account(&vote_acc, 0, &Account::new(1_000_000, Hash::zero()))

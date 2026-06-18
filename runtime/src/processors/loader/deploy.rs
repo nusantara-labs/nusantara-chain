@@ -1,5 +1,6 @@
 use nusantara_core::MAX_ACCOUNT_DATA_SIZE;
-use nusantara_core::program::LOADER_PROGRAM_ID;
+use nusantara_core::program::{LOADER_PROGRAM_ID, SYSTEM_PROGRAM_ID};
+use nusantara_crypto::Hash;
 use nusantara_loader_program::state::LoaderState;
 use nusantara_vm::validate_wasm;
 
@@ -22,7 +23,41 @@ pub(super) fn process_deploy(
     let authority_idx = accounts[4] as usize;
 
     require_signer(ctx, payer_idx)?;
+    // The program account must be a signer so the caller explicitly controls
+    // which address becomes the executable.
+    require_signer(ctx, program_idx)?;
     let authority_address = require_signer(ctx, authority_idx)?;
+
+    // Verify both target accounts are completely uninitialized (empty data,
+    // not executable, owned by system). Writing into a live program or
+    // program-data account would silently corrupt it.
+    // Fresh-account check: empty data and not executable. Owner may be Hash::zero
+    // (unloaded/missing) or SYSTEM_PROGRAM_ID; either is acceptable for a brand
+    // new account that has never been written to.
+    {
+        let program = ctx.get_account(program_idx)?;
+        if !program.account.data.is_empty()
+            || program.account.executable
+            || program.account.lamports != 0
+            || (program.account.owner != *SYSTEM_PROGRAM_ID
+                && program.account.owner != Hash::zero())
+        {
+            return Err(RuntimeError::AccountAlreadyExists);
+        }
+    }
+    {
+        let pd = ctx.get_account(program_data_idx)?;
+        // PD must additionally have zero lamports — otherwise crediting pd_rent
+        // via checked_add would violate lamport conservation (payer pays pd_rent
+        // but PD's total grows by pd_rent + pre-existing balance).
+        if !pd.account.data.is_empty()
+            || pd.account.executable
+            || pd.account.lamports != 0
+            || (pd.account.owner != *SYSTEM_PROGRAM_ID && pd.account.owner != Hash::zero())
+        {
+            return Err(RuntimeError::AccountAlreadyExists);
+        }
+    }
 
     // Extract bytecode from buffer
     let (bytecode, buffer_lamports) = {
@@ -100,20 +135,25 @@ pub(super) fn process_deploy(
     // Deduct rent from payer
     {
         let payer = ctx.get_account_mut(payer_idx)?;
-        if payer.account.lamports < pd_rent {
-            return Err(RuntimeError::InsufficientFunds {
+        payer.account.lamports = payer.account.lamports.checked_sub(pd_rent).ok_or(
+            RuntimeError::InsufficientFunds {
                 needed: pd_rent,
                 available: payer.account.lamports,
-            });
-        }
-        payer.account.lamports -= pd_rent;
+            },
+        )?;
     }
 
     // Write ProgramData account
     {
         let pd = ctx.get_account_mut(program_data_idx)?;
         pd.account.owner = *LOADER_PROGRAM_ID;
-        pd.account.lamports = pd_rent;
+        // Use checked_add so any pre-existing lamports are preserved rather than
+        // silently overwritten, and so arithmetic overflow is caught cleanly.
+        pd.account.lamports = pd
+            .account
+            .lamports
+            .checked_add(pd_rent)
+            .ok_or(RuntimeError::LamportsOverflow)?;
         let mut pd_data = pd_header_bytes;
         pd_data.extend_from_slice(&bytecode);
         pd_data.resize(pd_data.len() + bytecode_space - bytecode.len(), 0);

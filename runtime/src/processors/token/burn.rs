@@ -39,7 +39,7 @@ pub(super) fn process_burn(
 
     // Load source token account
     let src_acc = ctx.get_account(src_idx)?;
-    let mut token_acc = TokenAccount::try_from_slice(&src_acc.account.data)
+    let mut token_acc = TokenAccount::deserialize(&mut src_acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
 
     if token_acc.owner != auth_address && token_acc.delegate != Some(auth_address) {
@@ -73,7 +73,7 @@ pub(super) fn process_burn(
 
     // Update mint supply
     let mint_acc = ctx.get_account(mint_idx)?;
-    let mut mint = Mint::try_from_slice(&mint_acc.account.data)
+    let mut mint = Mint::deserialize(&mut mint_acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     mint.supply = mint
         .supply

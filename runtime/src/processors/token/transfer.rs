@@ -45,8 +45,9 @@ pub(super) fn process_transfer(
 
     // Load source
     let src_acc = ctx.get_account(src_idx)?;
-    let mut src_token = TokenAccount::try_from_slice(&src_acc.account.data)
-        .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+    let mut src_token =
+        TokenAccount::deserialize(&mut src_acc.account.data.as_slice())
+            .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     if src_token.state == AccountState::Frozen {
         return Err(super::token_err(TokenError::AccountFrozen));
     }
@@ -76,8 +77,9 @@ pub(super) fn process_transfer(
 
     // Load destination
     let dest_acc = ctx.get_account(dest_idx)?;
-    let mut dest_token = TokenAccount::try_from_slice(&dest_acc.account.data)
-        .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+    let mut dest_token =
+        TokenAccount::deserialize(&mut dest_acc.account.data.as_slice())
+            .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     if dest_token.state == AccountState::Frozen {
         return Err(super::token_err(TokenError::AccountFrozen));
     }
@@ -121,9 +123,21 @@ pub(super) fn process_approve(
 
     let delegate_address = *ctx.get_account(delegate_idx)?.address;
 
+    // Verify the token account is owned by the token program.
+    let src_owner_check = ctx.get_account(src_idx)?;
+    if src_owner_check.account.owner != *TOKEN_PROGRAM_ID {
+        return Err(RuntimeError::AccountOwnerMismatch);
+    }
+
     let src_acc = ctx.get_account(src_idx)?;
-    let mut token_acc = TokenAccount::try_from_slice(&src_acc.account.data)
-        .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+    let mut token_acc =
+        TokenAccount::deserialize(&mut src_acc.account.data.as_slice())
+            .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+
+    // A frozen account cannot have its delegation changed.
+    if token_acc.state == AccountState::Frozen {
+        return Err(super::token_err(TokenError::AccountFrozen));
+    }
 
     if token_acc.owner != owner_address {
         return Err(super::token_err(TokenError::OwnerMismatch));
@@ -154,9 +168,21 @@ pub(super) fn process_revoke(
     }
     let owner_address = *owner.address;
 
+    // Verify the token account is owned by the token program.
+    let src_owner_check = ctx.get_account(src_idx)?;
+    if src_owner_check.account.owner != *TOKEN_PROGRAM_ID {
+        return Err(RuntimeError::AccountOwnerMismatch);
+    }
+
     let src_acc = ctx.get_account(src_idx)?;
-    let mut token_acc = TokenAccount::try_from_slice(&src_acc.account.data)
-        .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+    let mut token_acc =
+        TokenAccount::deserialize(&mut src_acc.account.data.as_slice())
+            .map_err(|_| super::token_err(TokenError::NotInitialized))?;
+
+    // A frozen account's delegation cannot be revoked.
+    if token_acc.state == AccountState::Frozen {
+        return Err(super::token_err(TokenError::AccountFrozen));
+    }
 
     if token_acc.owner != owner_address {
         return Err(super::token_err(TokenError::OwnerMismatch));

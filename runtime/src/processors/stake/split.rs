@@ -1,3 +1,4 @@
+use nusantara_core::program::STAKE_PROGRAM_ID;
 use nusantara_stake_program::{Delegation, Meta, Stake, StakeStateV2};
 
 use super::super::helpers::{load_state, require_accounts, require_signer};
@@ -25,6 +26,15 @@ pub(super) fn process_split(
 
     let staker_address = require_signer(ctx, staker_idx)?;
 
+    // Source must actually be a stake-program-owned account; otherwise a crafted
+    // foreign-owned account with valid-looking Borsh bytes could pass load_state.
+    {
+        let acc = ctx.get_account(stake_idx)?;
+        if acc.account.owner != *STAKE_PROGRAM_ID {
+            return Err(RuntimeError::AccountOwnerMismatch);
+        }
+    }
+
     let (meta, stake_opt) = {
         let state: StakeStateV2 = load_state(ctx, stake_idx)?;
         match state {
@@ -40,6 +50,15 @@ pub(super) fn process_split(
 
     if meta.authorized.staker != staker_address {
         return Err(RuntimeError::AccountNotSigner(staker_idx));
+    }
+
+    // Destination must be a fresh, uninitialized account. Splitting into a live
+    // stake account would silently overwrite its state.
+    {
+        let split_acc = ctx.get_account(split_idx)?;
+        if !split_acc.account.data.is_empty() {
+            return Err(RuntimeError::AccountAlreadyExists);
+        }
     }
 
     let source_lamports = {
@@ -169,6 +188,9 @@ pub(super) fn process_split(
             .checked_add(lamports)
             .ok_or(RuntimeError::LamportsOverflow)?;
         acc.account.data = split_data;
+        // Explicitly set ownership so the new account is a valid stake account
+        // regardless of what owner the caller pre-funded it with.
+        acc.account.owner = *STAKE_PROGRAM_ID;
     }
 
     Ok(())

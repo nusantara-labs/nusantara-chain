@@ -1,5 +1,7 @@
 use borsh::BorshDeserialize;
 use nusantara_core::MAX_ACCOUNT_DATA_SIZE;
+use nusantara_core::program::SYSTEM_PROGRAM_ID;
+use nusantara_crypto::Hash;
 use nusantara_system_program::SystemInstruction;
 
 use super::helpers::{require_accounts, require_signer};
@@ -96,12 +98,6 @@ fn process_create_account(
     // Debit funder
     {
         let funder = ctx.get_account_mut(funder_idx)?;
-        if funder.account.lamports < lamports {
-            return Err(RuntimeError::InsufficientFunds {
-                needed: lamports,
-                available: funder.account.lamports,
-            });
-        }
         funder.account.lamports = funder
             .account
             .lamports
@@ -176,6 +172,17 @@ fn process_assign(
 
     require_signer(ctx, account_idx)?;
 
+    // Only the system program may reassign ownership via Assign.
+    // Accounts already owned by another program must be mutated by that program.
+    // Hash::zero is the default owner for unloaded/missing accounts (see
+    // account_loader) and is treated as system-owned.
+    {
+        let acc = ctx.get_account(account_idx)?;
+        if acc.account.owner != *SYSTEM_PROGRAM_ID && acc.account.owner != Hash::zero() {
+            return Err(RuntimeError::AccountOwnerMismatch);
+        }
+    }
+
     let acc = ctx.get_account_mut(account_idx)?;
     acc.account.owner = owner;
     Ok(())
@@ -190,6 +197,15 @@ fn process_allocate(
     let account_idx = accounts[0] as usize;
 
     require_signer(ctx, account_idx)?;
+
+    // Only system-owned accounts may have their data space allocated here.
+    // Hash::zero (default for unloaded accounts) is treated as system-owned.
+    {
+        let acc = ctx.get_account(account_idx)?;
+        if acc.account.owner != *SYSTEM_PROGRAM_ID && acc.account.owner != Hash::zero() {
+            return Err(RuntimeError::AccountOwnerMismatch);
+        }
+    }
 
     if space > MAX_ACCOUNT_DATA_SIZE {
         return Err(RuntimeError::AccountDataTooLarge {
@@ -485,7 +501,7 @@ mod tests {
         let accounts: Vec<_> = msg
             .account_keys
             .iter()
-            .map(|k| (*k, Account::new(1000, hash(b"system"))))
+            .map(|k| (*k, Account::new(1000, *SYSTEM_PROGRAM_ID)))
             .collect();
         let compiled_accounts = msg.instructions[0].accounts.clone();
         let data = msg.instructions[0].data.clone();
@@ -533,7 +549,7 @@ mod tests {
         let accounts: Vec<_> = msg
             .account_keys
             .iter()
-            .map(|k| (*k, Account::new(1000, hash(b"system"))))
+            .map(|k| (*k, Account::new(1000, *SYSTEM_PROGRAM_ID)))
             .collect();
         let compiled_accounts = msg.instructions[0].accounts.clone();
         let data = msg.instructions[0].data.clone();

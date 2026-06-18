@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nusantara_core::{Account, FeeCalculator, Transaction};
+use nusantara_core::{Account, FeeCalculator, Message, Transaction};
 use nusantara_crypto::Hash;
 use nusantara_storage::Storage;
 use nusantara_vm::ProgramCache;
@@ -12,6 +12,34 @@ use crate::error::RuntimeError;
 use crate::program_dispatch::{SIGNATURE_VERIFY_COST, dispatch_instruction};
 use crate::sysvar_cache::SysvarCache;
 use crate::transaction_context::TransactionContext;
+
+/// Validate that all instruction account indices are within bounds.
+///
+/// This runs before `parse_compute_budget` and account loading so a
+/// wire-deserialized transaction with a crafted `program_id_index` or accounts
+/// list cannot panic the executor with an out-of-bounds index access.
+pub(crate) fn sanitize_message(message: &Message) -> Result<(), RuntimeError> {
+    let n = message.account_keys.len();
+    for (ix_idx, ix) in message.instructions.iter().enumerate() {
+        let pid = ix.program_id_index as usize;
+        if pid >= n {
+            return Err(RuntimeError::InvalidInstructionData(format!(
+                "instruction {ix_idx}: program_id_index {pid} out of bounds \
+                 (account_keys len {n})"
+            )));
+        }
+        for (ai, &acc_idx) in ix.accounts.iter().enumerate() {
+            let acc = acc_idx as usize;
+            if acc >= n {
+                return Err(RuntimeError::InvalidInstructionData(format!(
+                    "instruction {ix_idx}: account index {ai} value {acc} out of bounds \
+                     (account_keys len {n})"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub struct TransactionResult {
     pub tx_hash: Hash,
@@ -41,6 +69,22 @@ pub fn execute_transaction(
 ) -> TransactionResult {
     // Step 1: Compute hash
     let tx_hash = tx.hash();
+
+    // Step 1.2: Sanitize message — verify all instruction indices are in bounds.
+    // This must run before parse_compute_budget (which indexes account_keys) to
+    // prevent a panic from a crafted program_id_index on wire-deserialized txs.
+    if let Err(e) = sanitize_message(&tx.message) {
+        return TransactionResult {
+            tx_hash,
+            status: Err(e),
+            fee: 0,
+            compute_units_consumed: 0,
+            account_deltas: vec![],
+            pre_balances: vec![],
+            post_balances: vec![],
+            loaded_accounts: HashMap::new(),
+        };
+    }
 
     // Step 1.5: Verify signatures (skip when already verified at TPU ingress)
     if !skip_sig_verify
@@ -243,7 +287,18 @@ fn execute_instructions(
 ) -> Result<(), RuntimeError> {
     for ix_idx in 0..ctx.message().instructions.len() {
         let program_id_index = ctx.message().instructions[ix_idx].program_id_index as usize;
-        let program_id = ctx.message().account_keys[program_id_index];
+        // Belt-and-suspenders: sanitize_message already validated these indices
+        // before we reached this point; these .get() calls guard against any
+        // future code path that bypasses sanitize_message.
+        let program_id = *ctx
+            .message()
+            .account_keys
+            .get(program_id_index)
+            .ok_or_else(|| {
+                RuntimeError::InvalidInstructionData(format!(
+                    "instruction {ix_idx}: program_id_index {program_id_index} out of bounds"
+                ))
+            })?;
         let accounts = ctx.message().instructions[ix_idx].accounts.clone();
         let data = ctx.message().instructions[ix_idx].data.clone();
         dispatch_instruction(&program_id, &accounts, &data, ctx, sysvars, program_cache)?;

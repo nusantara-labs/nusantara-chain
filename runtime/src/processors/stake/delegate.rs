@@ -1,9 +1,9 @@
-use borsh::BorshDeserialize;
+use nusantara_core::program::STAKE_PROGRAM_ID;
 use nusantara_stake_program::{
     DEFAULT_MIN_DELEGATION, DEFAULT_WARMUP_COOLDOWN_RATE_BPS, Delegation, Stake, StakeStateV2,
 };
 
-use super::super::helpers::{require_accounts, require_signer, save_state};
+use super::super::helpers::{load_state, require_accounts, require_signer, save_state};
 use crate::error::RuntimeError;
 use crate::sysvar_cache::SysvarCache;
 use crate::transaction_context::TransactionContext;
@@ -25,11 +25,19 @@ pub(super) fn process_delegate(
         *vote.address
     };
 
-    // Load current stake state
-    let (meta, _current_state) = {
+    // Verify ownership before touching state (defence in depth — initialize
+    // already enforces this, but a caller could craft an account bypass).
+    {
         let acc = ctx.get_account(stake_idx)?;
-        let state = StakeStateV2::try_from_slice(&acc.account.data)
-            .map_err(|e| RuntimeError::InvalidAccountData(e.to_string()))?;
+        if acc.account.owner != *STAKE_PROGRAM_ID {
+            return Err(RuntimeError::AccountOwnerMismatch);
+        }
+    }
+
+    // Load current stake state via the shared helper which uses
+    // BorshDeserialize::deserialize (tolerates trailing zeros in pre-allocated data).
+    let (meta, _current_state) = {
+        let state: StakeStateV2 = load_state(ctx, stake_idx)?;
         match state {
             StakeStateV2::Initialized(m) => (m, "initialized"),
             _ => {

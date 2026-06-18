@@ -28,7 +28,7 @@ pub(super) fn process_initialize_mint(
         return Err(RuntimeError::AccountOwnerMismatch);
     }
     if !existing.account.data.is_empty()
-        && let Ok(m) = Mint::try_from_slice(&existing.account.data)
+        && let Ok(m) = Mint::deserialize(&mut existing.account.data.as_slice())
         && m.is_initialized
     {
         return Err(super::token_err(TokenError::AlreadyInitialized));
@@ -74,7 +74,7 @@ pub(super) fn process_mint_to(
 
     // Load and update mint
     let mint_acc = ctx.get_account(mint_idx)?;
-    let mut mint = Mint::try_from_slice(&mint_acc.account.data)
+    let mut mint = Mint::deserialize(&mut mint_acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     if !mint.is_initialized {
         return Err(super::token_err(TokenError::NotInitialized));
@@ -96,7 +96,7 @@ pub(super) fn process_mint_to(
 
     // Load and update destination token account
     let dest_acc = ctx.get_account(dest_idx)?;
-    let mut token_acc = TokenAccount::try_from_slice(&dest_acc.account.data)
+    let mut token_acc = TokenAccount::deserialize(&mut dest_acc.account.data.as_slice())
         .map_err(|_| super::token_err(TokenError::NotInitialized))?;
     if token_acc.state == AccountState::Frozen {
         return Err(super::token_err(TokenError::AccountFrozen));

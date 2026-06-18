@@ -381,16 +381,6 @@ mod tests {
         let split_ix = nusantara_stake_program::split(&stake_acc, &staker, &split_acc, 500_000_000);
         let split_msg = Message::new(&[split_ix], &staker).unwrap();
 
-        let state_size = {
-            let idx = ctx
-                .message()
-                .account_keys
-                .iter()
-                .position(|a| a == &stake_acc)
-                .unwrap();
-            ctx.get_account(idx).unwrap().account.data.len()
-        };
-
         let split_accounts: Vec<_> = split_msg
             .account_keys
             .iter()
@@ -404,9 +394,9 @@ mod tests {
                         .unwrap();
                     (*k, ctx.get_account(idx).unwrap().account.clone())
                 } else if k == &split_acc {
-                    let mut a = Account::new(0, *STAKE_PROGRAM_ID);
-                    a.data = vec![0u8; state_size];
-                    (*k, a)
+                    // Destination must be a fresh uninitialized account (empty data).
+                    // split.rs falls back to the source data length for rent sizing.
+                    (*k, Account::new(0, Hash::zero()))
                 } else {
                     (*k, Account::new(1_000_000, Hash::zero()))
                 }
