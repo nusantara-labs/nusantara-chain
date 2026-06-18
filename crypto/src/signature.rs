@@ -77,7 +77,7 @@ impl Signature {
 impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b64 = self.to_base64();
-        write!(f, "Signature({}...)", &b64[..8])
+        write!(f, "Signature({}...)", &b64[..b64.len().min(8)])
     }
 }
 

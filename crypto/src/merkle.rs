@@ -10,9 +10,6 @@ fn hash_internal(left: &Hash, right: &Hash) -> Hash {
     hashv(&[&[0x01], left.as_bytes(), right.as_bytes()])
 }
 
-fn next_power_of_two(n: usize) -> usize {
-    n.next_power_of_two()
-}
 
 #[derive(Clone, Debug)]
 pub struct MerkleTree {
@@ -29,17 +26,20 @@ impl MerkleTree {
             };
         }
 
-        let padded_count = next_power_of_two(leaves.len());
+        let padded_count = leaves.len().next_power_of_two();
         let total_nodes = 2 * padded_count - 1;
         let mut nodes = vec![Hash::zero(); total_nodes];
+
+        // Compute the padding hash once; all empty leaf slots get the same value.
+        let pad_hash = hash_leaf(&Hash::zero());
 
         // Fill leaf layer
         for (i, leaf) in leaves.iter().enumerate() {
             nodes[padded_count - 1 + i] = hash_leaf(leaf);
         }
-        // Pad remaining leaves with Hash::zero() hashed as leaf
+        // Pad remaining leaves with the pre-computed constant
         for i in leaves.len()..padded_count {
-            nodes[padded_count - 1 + i] = hash_leaf(&Hash::zero());
+            nodes[padded_count - 1 + i] = pad_hash;
         }
 
         // Build internal nodes bottom-up

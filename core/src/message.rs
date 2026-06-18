@@ -30,7 +30,11 @@ impl Message {
         for ix in instructions {
             // Add program_id
             if let Some(pos) = account_keys.iter().position(|k| k == &ix.program_id) {
-                is_writable[pos] = false; // program accounts are not writable
+                // Never downgrade pos 0 (the fee payer) to read-only, even if
+                // the payer's key happens to equal a program_id.
+                if pos != 0 {
+                    is_writable[pos] = false; // program accounts are not writable
+                }
             } else {
                 account_keys.push(ix.program_id);
                 is_signer.push(false);
@@ -187,6 +191,60 @@ mod tests {
     fn empty_instructions_error() {
         let payer = hash(b"payer");
         assert!(Message::new(&[], &payer).is_err());
+    }
+
+    #[test]
+    fn payer_reused_as_program_id_stays_writable() {
+        // When the payer's key is also used as the program_id, the payer (index 0)
+        // must remain writable so fees can be deducted.
+        let payer = hash(b"payer_program");
+        let account = hash(b"account");
+
+        let ix = Instruction {
+            program_id: payer, // payer key reused as program
+            accounts: vec![AccountMeta::new(account, false)],
+            data: vec![1],
+        };
+
+        let msg = Message::new(&[ix], &payer).unwrap();
+        // payer must be index 0 and must remain writable
+        assert_eq!(msg.account_keys[0], payer);
+        assert!(msg.is_writable(0), "fee payer must stay writable");
+        assert!(msg.is_signer(0), "fee payer must stay a signer");
+    }
+
+    #[test]
+    fn account_that_is_also_program_id_becomes_readonly() {
+        // An account listed both as a writable instruction account and as a
+        // program_id in another instruction should end up read-only (program
+        // semantics win, provided it is not the payer).
+        let payer = hash(b"payer");
+        let dual_role = hash(b"dual");
+        let other = hash(b"other");
+
+        // First instruction: dual_role is a writable account
+        let ix1 = Instruction {
+            program_id: hash(b"prog1"),
+            accounts: vec![AccountMeta::new(dual_role, false)],
+            data: vec![],
+        };
+        // Second instruction: dual_role is the program_id
+        let ix2 = Instruction {
+            program_id: dual_role,
+            accounts: vec![AccountMeta::new(other, false)],
+            data: vec![],
+        };
+
+        let msg = Message::new(&[ix1, ix2], &payer).unwrap();
+        let dual_pos = msg
+            .account_keys
+            .iter()
+            .position(|k| k == &dual_role)
+            .expect("dual_role must be present");
+        // dual_role is not the payer, so being a program_id makes it read-only
+        assert!(!msg.is_writable(dual_pos), "program account must be read-only");
+        // payer is always writable
+        assert!(msg.is_writable(0), "payer must stay writable");
     }
 
     #[test]

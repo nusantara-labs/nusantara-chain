@@ -93,7 +93,13 @@ impl Transaction {
         // Bind signer identities to account keys: each signer's pubkey hash
         // must match the corresponding account_key to prevent a malicious signer
         // from operating on another user's accounts.
-        let required = self.message.num_required_signatures as usize;
+        if required > self.message.account_keys.len() {
+            return Err(CoreError::InvalidTransaction(format!(
+                "num_required_signatures {} exceeds account_keys count {}",
+                required,
+                self.message.account_keys.len()
+            )));
+        }
         for i in 0..required {
             let expected = self.message.account_keys[i];
             let actual = crypto_hash(self.signer_pubkeys[i].as_bytes());
@@ -108,13 +114,11 @@ impl Transaction {
     }
 
     pub fn hash(&self) -> Hash {
-        *self.cached_hash.get_or_init(|| {
-            if self.signatures.is_empty() {
-                crypto_hash(&self.message_data())
-            } else {
-                crypto_hash(self.signatures[0].as_bytes())
-            }
-        })
+        // Always hash the canonical message bytes so the transaction id is a
+        // deterministic commitment to the message content.  Dilithium3 is
+        // randomized, so hashing a signature would produce a different id each
+        // time the same message is signed.
+        *self.cached_hash.get_or_init(|| crypto_hash(&self.message_data()))
     }
 }
 

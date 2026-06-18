@@ -4,7 +4,15 @@ pub fn lamports_to_nusa(lamports: u64) -> f64 {
     lamports as f64 / LAMPORTS_PER_NUSA as f64
 }
 
+/// Convert a NUSA amount expressed as f64 to lamports.
+///
+/// This is a convenience/display function only.  f64 has 53 bits of mantissa,
+/// so values above 2^53 NUSA (~9 quadrillion) lose precision.  NaN, infinite,
+/// and negative inputs return 0.
 pub fn nusa_to_lamports(nusa: f64) -> u64 {
+    if !nusa.is_finite() || nusa < 0.0 {
+        return 0;
+    }
     (nusa * LAMPORTS_PER_NUSA as f64) as u64
 }
 
@@ -13,7 +21,9 @@ pub const fn const_parse_u64(s: &str) -> u64 {
     let mut result: u64 = 0;
     let mut i = 0;
     while i < bytes.len() {
-        result = result * 10 + (bytes[i] - b'0') as u64;
+        let b = bytes[i];
+        assert!(b >= b'0' && b <= b'9', "const_parse_u64: non-digit character in input");
+        result = result * 10 + (b - b'0') as u64;
         i += 1;
     }
     result

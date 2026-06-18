@@ -33,10 +33,13 @@ impl EpochSchedule {
 
     pub fn get_epoch_and_slot_index(&self, slot: u64) -> (u64, u64) {
         if slot < self.first_normal_slot {
-            // During warmup, epochs double in size
+            // Warmup branch: epochs double in size each epoch.
+            // `checked_shl` guards against overflow when epoch >= 64 (theoretically
+            // impossible with u64 slot space, but prevents UB-by-panic on malformed state).
             let epoch = slot.checked_ilog2().unwrap_or(0) as u64;
-            let epoch_len = 1u64 << epoch;
-            let slot_index = slot - (epoch_len - 1);
+            let epoch_len = 1u64.checked_shl(epoch as u32).unwrap_or(u64::MAX);
+            let epoch_start = epoch_len.saturating_sub(1);
+            let slot_index = slot.saturating_sub(epoch_start);
             (epoch, slot_index)
         } else {
             let normal_slot = slot - self.first_normal_slot;
@@ -51,7 +54,11 @@ impl EpochSchedule {
             if epoch == 0 {
                 0
             } else {
-                (1u64 << epoch) - 1
+                // Consistent with get_epoch_and_slot_index warmup formula:
+                // epoch N starts at (2^N - 1).  Guard shift for safety.
+                1u64.checked_shl(epoch as u32)
+                    .map(|v| v - 1)
+                    .unwrap_or(u64::MAX)
             }
         } else {
             self.first_normal_slot + (epoch - self.first_normal_epoch) * self.slots_per_epoch
