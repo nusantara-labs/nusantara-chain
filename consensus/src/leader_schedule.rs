@@ -64,7 +64,7 @@ impl LeaderScheduleGenerator {
         // for determinism (input may come from DashMap with random iteration order)
         let mut active_stakes: Vec<(Hash, u64)> =
             stakes.iter().filter(|(_, s)| *s > 0).cloned().collect();
-        active_stakes.sort_by(|a, b| a.0.cmp(&b.0));
+        active_stakes.sort_by_key(|a| a.0);
 
         if active_stakes.is_empty() {
             return Err(ConsensusError::NoValidatorsWithStake(epoch));

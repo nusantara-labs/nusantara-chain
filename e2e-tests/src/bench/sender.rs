@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use nusantara_crypto::{Hash, Keypair};
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -65,12 +65,9 @@ impl TransactionSender {
             Arc::new(Mutex::new(Vec::with_capacity(self.tx_count)));
 
         // Rate limiter: interval between sends (per sender)
-        let send_interval = if self.target_tps > 0 {
-            let interval_us = 1_000_000 * self.num_senders as u64 / self.target_tps;
-            Some(Duration::from_micros(interval_us))
-        } else {
-            None
-        };
+        let send_interval = (1_000_000 * self.num_senders as u64)
+            .checked_div(self.target_tps)
+            .map(Duration::from_micros);
 
         // Fetch initial blockhash
         let blockhash = Arc::new(Mutex::new(
@@ -279,12 +276,9 @@ impl TransactionSender {
         let remainder = batch.transactions.len() % self.num_senders;
 
         // Rate limiter
-        let send_interval = if self.target_tps > 0 {
-            let interval_us = 1_000_000 * self.num_senders as u64 / self.target_tps;
-            Some(Duration::from_micros(interval_us))
-        } else {
-            None
-        };
+        let send_interval = (1_000_000 * self.num_senders as u64)
+            .checked_div(self.target_tps)
+            .map(Duration::from_micros);
 
         // Split transactions into chunks per sender
         let mut tx_chunks: Vec<Vec<PreparedTransaction>> =

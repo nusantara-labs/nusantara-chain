@@ -34,7 +34,7 @@ impl GpuPohVerifier {
             force_fallback_adapter: false,
         }));
 
-        let Some(adapter) = adapter else {
+        let Ok(adapter) = adapter else {
             tracing::info!("No GPU adapter found, falling back to CPU verification");
             return Ok(None);
         };
@@ -44,9 +44,10 @@ impl GpuPohVerifier {
                 label: Some("PoH Verifier"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
             },
-            None,
         ))
         .map_err(|e| ConsensusError::Gpu(e.to_string()))?;
 
@@ -174,7 +175,7 @@ impl GpuPohVerifier {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         receiver
             .recv()

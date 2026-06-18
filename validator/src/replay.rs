@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use nusantara_core::block::Block;
@@ -30,6 +31,86 @@ impl ValidatorNode {
         let merged =
             crate::helpers::build_merged_slot_hashes(&entries, &self.storage, 512);
         self.bank.set_slot_hashes(SlotHashes(merged));
+    }
+
+    /// Replay blocks from local storage to accelerate catch-up.
+    ///
+    /// When a validator restarts with existing RocksDB data, blocks from
+    /// previous runs are already stored locally. This method reads them
+    /// sequentially and replays them, bypassing the slow repair pipeline.
+    /// Returns the number of blocks replayed.
+    pub(crate) fn catch_up_from_local_storage(&mut self) -> Result<u64, ValidatorError> {
+        let mut replayed = 0u64;
+        let best = self.replay_stage.fork_tree().best_slot();
+        let current = self.current_slot;
+        let tree_capacity = nusantara_consensus::MAX_UNCONFIRMED_DEPTH as usize * 4;
+
+        // Scan up to the full gap looking for blocks in local storage.
+        // Cap at 8192 to bound per-call cost. The caller loops until no
+        // progress, so even large gaps are covered across iterations.
+        let scan_limit = 8192.min(current.saturating_sub(best));
+        for offset in 1..=scan_limit {
+            let node_count = self.replay_stage.fork_tree().node_count();
+            if node_count + 32 >= tree_capacity {
+                // Force root advancement to make room for more replays.
+                // Walk the ancestry from best_slot and pick a node halfway
+                // through the tree depth as the new root (must be an actual
+                // tree node).
+                let current_best = self.replay_stage.fork_tree().best_slot();
+                let ancestry = self.replay_stage.fork_tree().get_ancestry(current_best);
+                if ancestry.len() > 2 {
+                    // Pick ~half the ancestry depth as the new root
+                    let idx = ancestry.len() / 2;
+                    let proposed = ancestry[idx];
+                    self.try_advance_root(proposed, true)?;
+                    tracing::debug!(
+                        proposed,
+                        node_count,
+                        ancestry_len = ancestry.len(),
+                        "forced root advancement during local catch-up"
+                    );
+                } else {
+                    break; // Can't advance further
+                }
+            }
+            let slot = best + offset;
+            if self.replay_stage.fork_tree().contains(slot) {
+                continue; // already replayed
+            }
+            match self.storage.get_block(slot) {
+                Ok(Some(block)) => {
+                    let parent_slot = block.header.parent_slot;
+                    if self
+                        .replay_stage
+                        .fork_tree()
+                        .get_node(parent_slot)
+                        .is_some()
+                    {
+                        self.replay_or_buffer_block(block)?;
+                        replayed += 1;
+                    }
+                    // If parent not in tree, skip — will be replayed later
+                    // when parent arrives.
+                }
+                Ok(None) => {} // No block at this slot (skipped/empty)
+                Err(e) => {
+                    tracing::debug!(slot, error = %e, "local storage read failed during catch-up");
+                    break;
+                }
+            }
+        }
+
+        if replayed > 0 {
+            info!(
+                replayed,
+                best_slot = best,
+                new_tip = self.replay_stage.current_tip(),
+                "caught up from local storage"
+            );
+            metrics::counter!("nusantara_local_catchup_blocks").increment(replayed);
+        }
+
+        Ok(replayed)
     }
 
     /// Replay a received block or buffer it if parent is missing.
@@ -81,7 +162,7 @@ impl ValidatorNode {
 
                 // Defer root advancement
                 if let Some(root) = result.new_root {
-                    self.try_advance_root(root)?;
+                    self.try_advance_root(root, false)?;
                 }
 
                 self.consecutive_skips.store(0, Ordering::Relaxed);
@@ -130,6 +211,7 @@ impl ValidatorNode {
                 }
 
                 metrics::counter!("nusantara_blocks_replayed").increment(1);
+                self.replay_tip_shared.store(slot, Ordering::Relaxed);
                 info!(
                     slot,
                     parent_slot,
@@ -159,10 +241,12 @@ impl ValidatorNode {
                     fork_tree_nodes = self.replay_stage.fork_tree().node_count(),
                     "buffering orphan block — parent not in fork tree"
                 );
-                // Evict oldest orphans if buffer is full
+                // Evict newest (furthest from root) orphans if buffer is full.
+                // Keeping blocks closest to the fork tree root maximises the
+                // chance of building a replayable chain from the bottom up.
                 while self.orphan_blocks.len() >= MAX_ORPHAN_BUFFER_SIZE {
-                    if let Some(oldest_slot) = self.orphan_blocks.keys().next().copied() {
-                        self.orphan_blocks.remove(&oldest_slot);
+                    if let Some(newest_slot) = self.orphan_blocks.keys().next_back().copied() {
+                        self.orphan_blocks.remove(&newest_slot);
                         metrics::counter!("nusantara_orphan_evictions").increment(1);
                     }
                 }
@@ -200,7 +284,10 @@ impl ValidatorNode {
 
     /// Replay buffered orphan blocks whose parents are now in the fork tree.
     pub(crate) fn process_orphan_queue(&mut self) -> Result<(), ValidatorError> {
-        let cutoff = self.current_slot.saturating_sub(ORPHAN_HORIZON);
+        // Use replay progress (not wall-clock slot) for eviction so that
+        // catching-up validators don't discard blocks they still need.
+        let replay_tip = self.replay_stage.current_tip();
+        let cutoff = replay_tip.saturating_sub(ORPHAN_HORIZON);
         self.orphan_blocks.retain(|slot, _| *slot > cutoff);
 
         let root = self.replay_stage.fork_tree().root_slot();
@@ -250,30 +337,86 @@ impl ValidatorNode {
     }
 
     /// Request repair for missing ancestors across ALL orphan chains.
+    ///
+    /// Walks orphan parent chains transitively to discover the full set of
+    /// missing slots, not just immediate parents. Prioritises lowest-numbered
+    /// slots (they unblock the most orphan chains).
     pub(crate) fn request_missing_slots(&self, _needed_slot: u64) {
         let root = self.replay_stage.fork_tree().root_slot();
         let mut to_repair = Vec::new();
+        let mut visited = HashSet::new();
 
-        for block in self.orphan_blocks.values() {
-            let parent = block.header.parent_slot;
-            if parent >= root
-                && self.replay_stage.fork_tree().get_node(parent).is_none()
-                && !self.orphan_blocks.contains_key(&parent)
-            {
-                to_repair.push(parent);
+        // Seed: all orphan parent slots that are above root
+        let mut stack: Vec<u64> = self
+            .orphan_blocks
+            .values()
+            .map(|b| b.header.parent_slot)
+            .filter(|&p| p >= root)
+            .collect();
+
+        // Walk orphan chains transitively
+        while let Some(slot) = stack.pop() {
+            if !visited.insert(slot) {
+                continue;
+            }
+            // Already in fork tree — no repair needed
+            if self.replay_stage.fork_tree().get_node(slot).is_some() {
+                continue;
+            }
+            if let Some(orphan) = self.orphan_blocks.get(&slot) {
+                // We have this block buffered; check its parent too
+                let parent = orphan.header.parent_slot;
+                if parent >= root {
+                    stack.push(parent);
+                }
+            } else {
+                // Slot is completely missing — needs repair
+                to_repair.push(slot);
+            }
+        }
+
+        // Sort ascending: lowest slots first (unblock the most chains)
+        to_repair.sort_unstable();
+        to_repair.dedup();
+
+        // Cold-start catch-up: fill remaining budget with sequential
+        // slots starting just above the fork tree's best slot. This
+        // bootstraps the chain bottom-up when the validator missed blocks.
+        // Cap at 256 to give the repair service a wide range — most will be
+        // empty (skipped) slots and get evicted quickly.
+        // Triggers when orphans exist OR when the replay gap is large (fresh
+        // container with no orphans yet).
+        const CATCH_UP_CAP: usize = 512;
+        let replay_tip = self.replay_stage.current_tip();
+        let catching_up = self.current_slot > replay_tip + 32;
+        if to_repair.len() < CATCH_UP_CAP && (catching_up || !self.orphan_blocks.is_empty()) {
+            let best = self.replay_stage.fork_tree().best_slot();
+            let fill_start = best + 1;
+            // Fill up to CATCH_UP_CAP slots ahead of best, regardless of
+            // orphan positions. Empty slots will be evicted by the repair
+            // service's 1s timeout.
+            let fill_end = fill_start + CATCH_UP_CAP as u64;
+            for slot in fill_start..fill_end {
+                if to_repair.len() >= CATCH_UP_CAP {
+                    break;
+                }
+                if !visited.contains(&slot) {
+                    to_repair.push(slot);
+                }
             }
         }
 
         to_repair.sort_unstable();
         to_repair.dedup();
-        let count = to_repair.len().min(32);
+        let count = to_repair.len().min(CATCH_UP_CAP);
         for &slot in &to_repair[..count] {
             self.shred_collector.request_slot_repair(slot);
         }
 
         if count > 0 {
             debug!(
-                gap_roots = count,
+                repair_requests = count,
+                total_missing = to_repair.len(),
                 fork_tree_root = root,
                 orphan_count = self.orphan_blocks.len(),
                 "requesting repair for missing ancestor slots"

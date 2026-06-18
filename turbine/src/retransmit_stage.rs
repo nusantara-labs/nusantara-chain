@@ -13,14 +13,18 @@ use crate::protocol::TurbineMessage;
 use crate::shred_collector::ShredCollector;
 use crate::turbine_tree::TurbineTree;
 
-/// Shreds older than this many slots behind the tip are not retransmitted.
-const RETRANSMIT_SLOT_HORIZON: u64 = 64;
+/// Shreds older than this many slots behind the replay tip are not retransmitted.
+/// 1024 slots = ~409s at 400ms/slot — matches ORPHAN_HORIZON so followers
+/// don't drop shreds they still need during catch-up.
+const RETRANSMIT_SLOT_HORIZON: u64 = 1024;
 
 pub struct RetransmitStage {
     my_identity: Hash,
     socket: Arc<UdpSocket>,
     collector: Arc<ShredCollector>,
-    current_slot: Arc<AtomicU64>,
+    /// Replay progress counter — used for stale-slot filtering instead of
+    /// wall-clock slot to prevent catch-up death spirals.
+    replay_tip: Arc<AtomicU64>,
 }
 
 impl RetransmitStage {
@@ -28,13 +32,14 @@ impl RetransmitStage {
         my_identity: Hash,
         socket: Arc<UdpSocket>,
         collector: Arc<ShredCollector>,
-        current_slot: Arc<AtomicU64>,
+        _current_slot: Arc<AtomicU64>,
+        replay_tip: Arc<AtomicU64>,
     ) -> Self {
         Self {
             my_identity,
             socket,
             collector,
-            current_slot,
+            replay_tip,
         }
     }
 
@@ -69,9 +74,11 @@ impl RetransmitStage {
                                 continue;
                             }
 
-                            // Skip stale slots far behind the chain tip
-                            let current = self.current_slot.load(Ordering::Relaxed);
-                            if current > RETRANSMIT_SLOT_HORIZON && slot < current - RETRANSMIT_SLOT_HORIZON {
+                            // Skip stale slots far behind replay progress.
+                            // Use replay_tip (not wall-clock) so catching-up validators
+                            // accept shreds they still need to replay.
+                            let tip = self.replay_tip.load(Ordering::Relaxed);
+                            if tip > RETRANSMIT_SLOT_HORIZON && slot < tip - RETRANSMIT_SLOT_HORIZON {
                                 metrics::counter!("nusantara_turbine_retransmit_skipped_stale").increment(1);
                                 continue;
                             }
@@ -129,9 +136,9 @@ impl RetransmitStage {
                                 continue;
                             }
 
-                            // Skip stale slots far behind the chain tip
-                            let current = self.current_slot.load(Ordering::Relaxed);
-                            if current > RETRANSMIT_SLOT_HORIZON && slot < current - RETRANSMIT_SLOT_HORIZON {
+                            // Skip stale slots far behind replay progress.
+                            let tip = self.replay_tip.load(Ordering::Relaxed);
+                            if tip > RETRANSMIT_SLOT_HORIZON && slot < tip - RETRANSMIT_SLOT_HORIZON {
                                 metrics::counter!("nusantara_turbine_retransmit_skipped_stale").increment(1);
                                 continue;
                             }

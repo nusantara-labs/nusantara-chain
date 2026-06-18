@@ -1,5 +1,5 @@
 # Stage 1: Install cargo-chef
-FROM rust:1.93-bookworm AS chef
+FROM rust:1.96-bookworm AS chef
 RUN cargo install cargo-chef
 WORKDIR /build
 
@@ -12,8 +12,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 RUN apt-get update && apt-get install -y \
-    libclang-dev cmake pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+  libclang-dev cmake pkg-config \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
@@ -26,8 +26,8 @@ RUN cargo build --release --bin nusantara-validator --bin nusantara
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+  ca-certificates libssl3 \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/nusantara-validator /usr/local/bin/
 COPY --from=builder /build/target/release/nusantara /usr/local/bin/

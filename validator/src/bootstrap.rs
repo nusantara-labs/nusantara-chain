@@ -425,6 +425,7 @@ impl ValidatorNode {
             tpu_forward_addr,
             consecutive_skips: Arc::new(AtomicU64::new(0)),
             total_skips: 0,
+            replay_tip_shared: Arc::new(AtomicU64::new(last_root)),
             gossip_vote_cursor,
             slash_detector: nusantara_consensus::SlashDetector::new(),
             fee_calculator,
@@ -437,6 +438,7 @@ impl ValidatorNode {
             failed_fork_targets: HashSet::new(),
             last_voted_slot: current_slot,
             last_produced_parent: None,
+            last_fork_switch_target: None,
             max_txs_per_slot: cli.max_txs_per_slot,
         })
     }

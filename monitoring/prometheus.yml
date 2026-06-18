@@ -20,3 +20,9 @@ scrape_configs:
       - targets: ["validator-3:9090"]
         labels:
           instance: "validator-3"
+
+  - job_name: "nusantara-validator-4"
+    static_configs:
+      - targets: ["validator-4:9090"]
+        labels:
+          instance: "validator-4"

@@ -11,11 +11,16 @@ impl ValidatorNode {
     /// 1. Prune parents that pending orphan blocks depend on
     /// 2. Disconnect fork branches that other validators may be building on
     ///
-    /// Without these gates, root advancement prunes other validators' forks,
-    /// causing permanent chain divergence.
+    /// When `catching_up` is true, Gate 2 (fork branch preservation) is
+    /// skipped because the follower is replaying the leader's linear chain
+    /// and there are no competing forks to preserve.
+    ///
+    /// Without these gates in steady state, root advancement prunes other
+    /// validators' forks, causing permanent chain divergence.
     pub(crate) fn try_advance_root(
         &mut self,
         proposed_root: u64,
+        catching_up: bool,
     ) -> Result<(), ValidatorError> {
         let current_root = self.replay_stage.fork_tree().root_slot();
         if proposed_root <= current_root {
@@ -36,6 +41,7 @@ impl ValidatorNode {
             self.replay_stage.advance_root(proposed_root)?;
             metrics::gauge!("nusantara_root_slot").set(proposed_root as f64);
             self.failed_fork_targets.clear();
+            self.last_fork_switch_target = None;
             return Ok(());
         }
 
@@ -56,27 +62,47 @@ impl ValidatorNode {
         }
 
         // Gate 2: Don't advance past *recent* fork points that have branches
-        // outside the proposed root's ancestry chain.
-        let fork_horizon = proposed_root.saturating_sub(ORPHAN_HORIZON);
-        let ancestry = self.replay_stage.fork_tree().get_ancestry(proposed_root);
-        let ancestry_set: HashSet<u64> = ancestry.iter().copied().collect();
-        for &slot in &ancestry {
-            if slot < current_root || slot < fork_horizon {
-                break;
-            }
-            if let Some(node) = self.replay_stage.fork_tree().get_node(slot) {
-                let has_branch = node
-                    .children
-                    .iter()
-                    .any(|child| !ancestry_set.contains(child));
-                if has_branch {
-                    safe_root = safe_root.min(slot);
-                    tracing::debug!(
-                        fork_point = slot,
-                        proposed_root,
-                        "limiting root to preserve fork branch"
-                    );
+        // outside the proposed root's ancestry chain. Skipped during catch-up
+        // because the follower is replaying a linear chain with no competing
+        // forks to preserve.
+        if !catching_up {
+            let fork_horizon = proposed_root.saturating_sub(ORPHAN_HORIZON);
+            let ancestry = self.replay_stage.fork_tree().get_ancestry(proposed_root);
+            let ancestry_set: HashSet<u64> = ancestry.iter().copied().collect();
+            for &slot in &ancestry {
+                if slot < current_root || slot < fork_horizon {
+                    break;
                 }
+                if let Some(node) = self.replay_stage.fork_tree().get_node(slot) {
+                    let has_branch = node
+                        .children
+                        .iter()
+                        .any(|child| !ancestry_set.contains(child));
+                    if has_branch {
+                        safe_root = safe_root.min(slot);
+                        tracing::debug!(
+                            fork_point = slot,
+                            proposed_root,
+                            "limiting root to preserve fork branch"
+                        );
+                    }
+                }
+            }
+        }
+
+        if safe_root > current_root {
+            // safe_root may land on an empty/skipped slot that isn't in the
+            // fork tree. Snap down to the nearest actual tree node using the
+            // best-slot ancestry (ordered tip → root).
+            if !self.replay_stage.fork_tree().contains(safe_root) {
+                let best = self.replay_stage.fork_tree().best_slot();
+                let ancestry = self.replay_stage.fork_tree().get_ancestry(best);
+                // ancestry is ordered from tip → root; find highest <= safe_root
+                safe_root = ancestry
+                    .into_iter()
+                    .filter(|&s| s <= safe_root && s > current_root)
+                    .max()
+                    .unwrap_or(current_root);
             }
         }
 
@@ -84,6 +110,7 @@ impl ValidatorNode {
             self.replay_stage.advance_root(safe_root)?;
             metrics::gauge!("nusantara_root_slot").set(safe_root as f64);
             self.failed_fork_targets.clear();
+            self.last_fork_switch_target = None;
             if safe_root < proposed_root {
                 tracing::debug!(
                     proposed_root,
@@ -200,8 +227,9 @@ impl ValidatorNode {
                 .set_parent(target, node.block_hash, node.bank_hash);
         }
 
-        // Success — clear failed targets since fork landscape changed
-        self.failed_fork_targets.clear();
+        // Note: failed_fork_targets is cleared only on root advancement
+        // (in try_advance_root), not here, to prevent infinite fork-switch spam
+        // when the fork landscape hasn't genuinely changed.
         info!(new_tip = target, "fork switch complete");
         metrics::counter!("nusantara_fork_switches_completed").increment(1);
     }

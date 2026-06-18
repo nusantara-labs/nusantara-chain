@@ -12,8 +12,7 @@
 //! 6. **No start function** -- modules with a WASM `start` section are rejected
 //!    because they execute arbitrary code at instantiation time.
 
-use wasmi::core::ValType;
-use wasmi::{Engine, ExternType, FuncType, Module};
+use wasmi::{Engine, ExternType, FuncType, Module, ValType};
 
 use crate::config::{MAX_MEMORY_PAGES, MAX_WASM_BYTECODE_SIZE};
 use crate::error::VmError;
@@ -84,13 +83,70 @@ pub fn validate_wasm(bytecode: &[u8]) -> Result<(), VmError> {
         return Err(VmError::MissingMemory);
     }
 
-    // 6. Start-function detection: we attempt `ensure_no_start` during
-    //    execution in the executor. At validation time we rely on the fact
-    //    that wasmi will report a start-function error during instantiation
-    //    via `InstancePre::ensure_no_start`. There is no public accessor on
-    //    `Module` for the start section, so we defer the check.
+    // 6. Start-function detection: wasmi 1.x removed the `InstancePre`
+    //    pre-instantiation API and exposes no public accessor for a module's
+    //    start section, so we scan the raw WASM section table ourselves and
+    //    reject any module that declares a start function.
+    if has_start_section(bytecode) {
+        return Err(VmError::HasStartFunction);
+    }
 
     Ok(())
+}
+
+/// Scan the raw WASM binary for a `start` section (section id `8`).
+///
+/// The start section executes arbitrary code at instantiation time, which we
+/// disallow on-chain. WASM section layout after the 8-byte header is a flat
+/// sequence of `(section_id: u8, size: u32 LEB128, payload[size])` records, so
+/// we walk the records and look for id `8`. Malformed input simply stops the
+/// walk and reports "no start section"; structural validity is already
+/// guaranteed by the preceding `Module::new` parse.
+pub(crate) fn has_start_section(bytecode: &[u8]) -> bool {
+    // Skip the 4-byte magic (`\0asm`) and 4-byte version.
+    let mut pos = 8;
+    if bytecode.len() < pos {
+        return false;
+    }
+    while pos < bytecode.len() {
+        let section_id = bytecode[pos];
+        pos += 1;
+        // Read the unsigned LEB128 section size.
+        let Some((size, consumed)) = read_uleb128(&bytecode[pos..]) else {
+            return false;
+        };
+        pos += consumed;
+        if section_id == 8 {
+            return true;
+        }
+        // Skip this section's payload.
+        let Some(next) = pos.checked_add(size as usize) else {
+            return false;
+        };
+        if next > bytecode.len() {
+            return false;
+        }
+        pos = next;
+    }
+    false
+}
+
+/// Decode an unsigned LEB128 integer, returning `(value, bytes_consumed)`.
+/// Returns `None` on truncated or overlong (> 5-byte / u32-overflowing) input.
+fn read_uleb128(bytes: &[u8]) -> Option<(u32, usize)> {
+    let mut result: u32 = 0;
+    let mut shift = 0u32;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if shift >= 32 {
+            return None;
+        }
+        result |= ((byte & 0x7f) as u32).checked_shl(shift)?;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

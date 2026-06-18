@@ -1,4 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use nusantara_crypto::{Hash, Hasher, Keypair, MerkleTree, hash, hashv};
 
 fn bench_hashing(c: &mut Criterion) {

@@ -103,6 +103,37 @@ services:
       - validator3-data:/data
       - genesis-data:/genesis:ro
 
+  validator-4:
+    <<: *validator-defaults
+    container_name: nusantara-validator-4
+    depends_on:
+      genesis-init:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=debug
+      - IS_BOOTSTRAP=false
+      - VALIDATOR_NUM=4
+      - GENESIS_LEDGER=/genesis/ledger
+    command:
+      - "--ledger-path=/data/ledger"
+      - "--genesis-config=/etc/nusantara/genesis.toml"
+      - "--gossip-addr=0.0.0.0:8000"
+      - "--rpc-addr=0.0.0.0:8899"
+      - "--metrics-addr=0.0.0.0:9090"
+      - "--enable-faucet"
+      - "--hashes-per-tick=1"
+      - "--max-ledger-slots=10000"
+      - "--public-host=validator-4"
+      - "--entrypoints=validator-1:8000"
+      - "--entrypoints=validator-2:8000"
+      - "--entrypoints=validator-3:8000"
+    ports:
+      - "8902:8899"
+      - "9093:9090"
+    volumes:
+      - validator4-data:/data
+      - genesis-data:/genesis:ro
+
   nginx:
     image: nginx:alpine
     container_name: nusantara-nginx
@@ -114,6 +145,7 @@ services:
       - validator-1
       - validator-2
       - validator-3
+      - validator-4
     networks:
       - nusantara
 
@@ -123,7 +155,7 @@ services:
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
-      - "9093:9090"
+      - "9094:9090"
     networks:
       - nusantara
 
@@ -148,6 +180,7 @@ volumes:
   validator1-data:
   validator2-data:
   validator3-data:
+  validator4-data:
 
 networks:
   nusantara:

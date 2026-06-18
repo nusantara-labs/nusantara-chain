@@ -46,7 +46,7 @@ pub async fn get_validators(
         .collect();
 
     // Sort by stake descending
-    validators.sort_by(|a, b| b.active_stake.cmp(&a.active_stake));
+    validators.sort_by_key(|b| std::cmp::Reverse(b.active_stake));
 
     Ok(Json(ValidatorsResponse {
         total_active_stake,

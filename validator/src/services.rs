@@ -75,7 +75,7 @@ impl ValidatorNode {
         let (shred_tx, shred_rx) = mpsc::channel(10_000);
         let repair_shred_tx = shred_tx.clone();
         let (repair_msg_tx, _repair_msg_rx) = mpsc::channel(1_000);
-        let (block_tx, block_rx) = mpsc::channel(100);
+        let (block_tx, block_rx) = mpsc::channel(1_000);
 
         // 3a. ShredReceiver
         let shred_receiver = ShredReceiver::new(Arc::clone(&turbine_socket));
@@ -93,6 +93,7 @@ impl ValidatorNode {
             Arc::clone(&turbine_socket),
             Arc::clone(&shred_collector),
             Arc::clone(&current_slot_shared),
+            Arc::clone(&self.replay_tip_shared),
         );
         let retransmit_shutdown = shutdown_rx.clone();
 
@@ -157,6 +158,7 @@ impl ValidatorNode {
             Arc::clone(&repair_socket),
             Arc::clone(&shred_collector),
             Arc::clone(&current_slot_shared),
+            Arc::clone(&self.replay_tip_shared),
         );
         let repair_shutdown = shutdown_rx.clone();
         let repair_ci = Arc::clone(&self.cluster_info);
@@ -344,6 +346,9 @@ fn spawn_repair_responder(
             Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
                 std::num::NonZero::new(64).unwrap(),
             )));
+        // Note: we intentionally do NOT use a negative cache for empty slots
+        // because peers may receive blocks via turbine AFTER a repair request
+        // misses, and a stale negative cache would block all future responses.
         loop {
             tokio::select! {
                 biased;
@@ -371,7 +376,16 @@ fn spawn_repair_responder(
                                         metrics::counter!("nusantara_turbine_repair_cache_hits").increment(1);
                                         batch
                                     } else {
-                                        // Offload blocking RocksDB read to spawn_blocking
+                                        // Fast pre-check: skip spawn_blocking if block header
+                                        // doesn't exist. This is a cheap RocksDB key-exists
+                                        // check that avoids the overhead of spawning a blocking
+                                        // task for empty/skipped slots.
+                                        if !storage.has_block_header(slot).unwrap_or(false) {
+                                            continue;
+                                        }
+                                        // Offload blocking RocksDB read + re-shredding to
+                                        // spawn_blocking (the full block deserialization and
+                                        // shredding are expensive).
                                         let storage_clone = storage.clone();
                                         let keypair_clone = Arc::clone(&keypair);
                                         let result = tokio::task::spawn_blocking(move || {
@@ -515,6 +529,17 @@ fn spawn_repair_responder(
                                         let msg = TurbineMessage::Shred(shred);
                                         let _ = shred_tx.send((msg, src)).await;
                                     }
+                                }
+                                Ok(TurbineMessage::ShredBatchHeader(header)) => {
+                                    tracing::debug!(
+                                        slot = header.slot,
+                                        %src,
+                                        "received batch header via repair"
+                                    );
+                                    metrics::counter!("nusantara_turbine_repair_headers_received")
+                                        .increment(1);
+                                    let msg = TurbineMessage::ShredBatchHeader(header);
+                                    let _ = shred_tx.send((msg, src)).await;
                                 }
                                 _ => {}
                             }

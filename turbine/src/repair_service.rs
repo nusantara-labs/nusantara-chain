@@ -17,13 +17,15 @@ pub const REPAIR_INTERVAL_MS: u64 = const_parse_u64(env!("NUSA_TURBINE_REPAIR_IN
 pub const MAX_REPAIR_BATCH_REQUEST: u64 =
     const_parse_u64(env!("NUSA_TURBINE_MAX_REPAIR_BATCH_REQUEST"));
 
-/// Slots older than this relative to current_slot are evicted from the
-/// ShredCollector on each repair tick.
-const MAX_REPAIR_SLOT_AGE: u64 = 64;
+/// Slots older than this relative to replay_tip are evicted from the
+/// ShredCollector on each repair tick. 1024 slots = ~409s at 400ms/slot.
+/// Matches ORPHAN_HORIZON so followers retain shreds during catch-up.
+const MAX_REPAIR_SLOT_AGE: u64 = 1024;
 
 /// Maximum number of slots to request repairs for per tick.
-/// With 200ms tick interval, this paces repair to 20 slots/second.
-const MAX_REPAIR_SLOTS_PER_TICK: usize = 16;
+/// With 200ms tick interval, this paces repair to 2560 slots/second.
+/// High value is needed for catch-up where many slots are empty/skipped.
+const MAX_REPAIR_SLOTS_PER_TICK: usize = 512;
 
 /// Number of random peers to send each repair request to.
 const REPAIR_PEER_SAMPLE_SIZE: usize = 2;
@@ -37,13 +39,16 @@ fn sample_peers(peers: &[SocketAddr], count: usize) -> Vec<SocketAddr> {
         return peers.to_vec();
     }
     let mut rng = rand::rng();
-    peers.choose_multiple(&mut rng, count).copied().collect()
+    peers.sample(&mut rng, count).copied().collect()
 }
 
 pub struct RepairService {
     socket: Arc<UdpSocket>,
     collector: Arc<ShredCollector>,
     current_slot: Arc<AtomicU64>,
+    /// Replay progress counter — used for eviction instead of wall-clock slot
+    /// to prevent catch-up death spirals when the validator falls behind.
+    replay_tip: Arc<AtomicU64>,
 }
 
 impl RepairService {
@@ -51,11 +56,13 @@ impl RepairService {
         socket: Arc<UdpSocket>,
         collector: Arc<ShredCollector>,
         current_slot: Arc<AtomicU64>,
+        replay_tip: Arc<AtomicU64>,
     ) -> Self {
         Self {
             socket,
             collector,
             current_slot,
+            replay_tip,
         }
     }
 
@@ -70,13 +77,66 @@ impl RepairService {
         let interval = tokio::time::Duration::from_millis(REPAIR_INTERVAL_MS);
         let mut tick = tokio::time::interval(interval);
         let mut last_repair: HashMap<u64, Instant> = HashMap::new();
+        let mut first_tracked: HashMap<u64, Instant> = HashMap::new();
 
         loop {
             tokio::select! {
                 biased;
                 _ = tick.tick() => {
                     let current = self.current_slot.load(Ordering::Relaxed);
-                    let evicted = self.collector.cleanup_old_slots(current, MAX_REPAIR_SLOT_AGE);
+                    // Evict based on replay progress, not wall-clock slot,
+                    // so catching-up validators don't lose shreds they still need.
+                    let replay_tip = self.replay_tip.load(Ordering::Relaxed);
+                    let evicted = self.collector.cleanup_old_slots(replay_tip, MAX_REPAIR_SLOT_AGE);
+
+                    // Evict tracked slots with 0 shreds that have been
+                    // tracked for >=3s (empty/skipped slots). Without this,
+                    // empty slot entries consume repair budget indefinitely
+                    // and block catch-up progress.
+                    {
+                        let now = Instant::now();
+                        // Record first-tracked time for new entries
+                        for &s in &self.collector.tracked_slots() {
+                            first_tracked.entry(s).or_insert(now);
+                        }
+                        let stale: Vec<u64> = self.collector.tracked_slots()
+                            .into_iter()
+                            .filter(|&s| {
+                                if self.collector.shred_count(s) > 0 {
+                                    return false; // has shreds, still in progress
+                                }
+                                if s < replay_tip {
+                                    return true; // replayed past
+                                }
+                                // Empty and tracked for >=1s → likely empty slot
+                                first_tracked.get(&s)
+                                    .is_some_and(|t| now.duration_since(*t).as_millis() >= 1000)
+                            })
+                            .collect();
+                        for s in &stale {
+                            // Mark as "known empty" so request_slot_repair()
+                            // won't re-add this slot. Uses mark_slot_empty()
+                            // (NOT mark_slot_stored) so turbine shreds are
+                            // still accepted if the slot has a block later.
+                            self.collector.mark_slot_empty(*s);
+                            self.collector.remove_slot(*s);
+                            last_repair.remove(s);
+                            first_tracked.remove(s);
+                        }
+                        if !stale.is_empty() {
+                            debug!(
+                                count = stale.len(),
+                                replay_tip,
+                                "evicted empty/stale tracked slots"
+                            );
+                            metrics::counter!("nusantara_turbine_empty_slots_evicted")
+                                .increment(stale.len() as u64);
+                        }
+                        // Clean first_tracked for no-longer-tracked slots
+                        let tracked: std::collections::HashSet<u64> =
+                            self.collector.tracked_slots().into_iter().collect();
+                        first_tracked.retain(|s, _| tracked.contains(s));
+                    }
 
                     // Purge cooldown entries for slots no longer tracked
                     let tracked: std::collections::HashSet<u64> = self.collector.tracked_slots().into_iter().collect();
@@ -86,8 +146,16 @@ impl RepairService {
                     }
 
                     let mut slots = self.collector.tracked_slots();
-                    // Prioritize most recent slots, cap per tick to prevent burst
-                    slots.sort_unstable_by(|a, b| b.cmp(a));
+                    // When catching up (large gap between wall-clock and replay
+                    // progress), prioritise lowest slots to bootstrap the chain
+                    // from the bottom up. In steady state, prioritise newest
+                    // slots to stay current with the chain head.
+                    let catching_up = current > replay_tip + 128;
+                    if catching_up {
+                        slots.sort_unstable();
+                    } else {
+                        slots.sort_unstable_by(|a, b| b.cmp(a));
+                    }
                     let deferred = slots.len().saturating_sub(MAX_REPAIR_SLOTS_PER_TICK);
                     if deferred > 0 {
                         metrics::counter!("nusantara_turbine_repair_slots_deferred").increment(deferred as u64);
@@ -104,17 +172,23 @@ impl RepairService {
                         info!(tracked_slots = slots.len(), peers = peers.len(), "repair tick");
                     }
 
+                    // During catch-up, use aggressive cooldown (50ms) to
+                    // maximize repair throughput. In steady state, use the
+                    // default 1s cooldown to avoid overloading peers.
+                    let effective_cooldown = if catching_up { 50u128 } else { REPAIR_COOLDOWN_MS as u128 };
+                    let effective_peer_sample = if catching_up { 3 } else { REPAIR_PEER_SAMPLE_SIZE };
+
                     for slot in &slots {
                         // Skip slots that were recently repaired (cooldown)
                         let now = Instant::now();
                         if let Some(last) = last_repair.get(slot)
-                            && now.duration_since(*last).as_millis() < REPAIR_COOLDOWN_MS as u128
+                            && now.duration_since(*last).as_millis() < effective_cooldown
                         {
                             metrics::counter!("nusantara_turbine_repair_cooldown_skipped").increment(1);
                             continue;
                         }
 
-                        let selected = sample_peers(&peers, REPAIR_PEER_SAMPLE_SIZE);
+                        let selected = sample_peers(&peers, effective_peer_sample);
 
                         // Request batch header if missing
                         if !self.collector.has_header(*slot) && self.collector.shred_count(*slot) > 0 {

@@ -22,6 +22,12 @@ vote_account = "derive"
 stake_lamports = 500_000_000_000
 commission = 10
 
+[[validators]]
+identity = "generate"
+vote_account = "derive"
+stake_lamports = 500_000_000_000
+commission = 10
+
 [faucet]
 address = "generate"
 lamports = 1_000_000_000_000_000_000

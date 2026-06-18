@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::cli::Cli;
-use crate::constants::{GOSSIP_REPORT_INTERVAL, LEDGER_PRUNE_INTERVAL};
+use crate::constants::{CATCHUP_THRESHOLD, GOSSIP_REPORT_INTERVAL, LEDGER_PRUNE_INTERVAL};
 use crate::helpers;
 use crate::error::ValidatorError;
 use crate::node::ValidatorNode;
@@ -55,26 +55,106 @@ impl ValidatorNode {
                     break;
                 }
                 _ = self.slot_clock.wait_for_slot(self.current_slot) => {
-                    // Update shared current_slot for TPU closure
+                    // Update shared current_slot for TPU closure and metrics
                     current_slot_shared.store(self.current_slot, Ordering::Relaxed);
+                    metrics::gauge!("nusantara_current_slot").set(self.current_slot as f64);
+
+                    // Track replay gap — how far behind wall-clock the validator is
+                    let replay_tip = self.replay_stage.current_tip();
+                    let replay_gap = self.current_slot.saturating_sub(replay_tip);
+                    metrics::gauge!("nusantara_replay_gap").set(replay_gap as f64);
+                    metrics::gauge!("nusantara_replay_tip").set(replay_tip as f64);
+                    if replay_gap > 128 {
+                        tracing::warn!(
+                            current_slot = self.current_slot,
+                            replay_tip,
+                            replay_gap,
+                            orphan_count = self.orphan_blocks.len(),
+                            "replay gap exceeds 128 slots — validator falling behind"
+                        );
+                    }
+
+                    let catching_up = replay_gap > CATCHUP_THRESHOLD;
+                    if catching_up {
+                        metrics::counter!("nusantara_catchup_mode_entered").increment(1);
+                    }
 
                     if self.am_i_leader(self.current_slot) {
                         self.leader_slot(&broadcast_stage, &mut block_rx).await?;
                     } else {
-                        self.non_leader_slot(&mut block_rx, cli.leader_timeout_ms).await?;
+                        // During catch-up, use zero timeout to drain blocks
+                        // without waiting — the slot loop runs at full speed
+                        // for past slots and we must not block on each one.
+                        let effective_timeout = if catching_up { 0 } else { cli.leader_timeout_ms };
+                        self.non_leader_slot(&mut block_rx, effective_timeout, catching_up).await?;
                     }
 
                     self.process_gossip_votes();
 
-                    // Check for fork switch (F3)
+                    // Check for fork switch (F3) with dedup to prevent spam
                     if let Some(plan) = self.replay_stage.check_fork_switch() {
                         let target = plan.replay_slots.last().copied()
                             .unwrap_or(plan.common_ancestor);
                         if self.failed_fork_targets.contains(&target) {
                             tracing::trace!(target, "skipping fork switch — already failed");
+                        } else if self.last_fork_switch_target == Some(target) {
+                            tracing::trace!(target, "skipping fork switch — same target as last attempt");
                         } else {
+                            self.last_fork_switch_target = Some(target);
                             self.handle_fork_switch(plan);
                         }
+                    }
+
+                    // When catching up, replay blocks from local storage
+                    // first (much faster than network repair). Loop until
+                    // no more progress so all available blocks are replayed
+                    // in a single slot tick rather than one batch per tick.
+                    if catching_up {
+                        loop {
+                            let n = self.catch_up_from_local_storage()?;
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Proactive root advancement: every 32 slots, if the
+                    // fork tree has grown past 48 nodes, advance root to
+                    // the ancestry midpoint. This prevents tree exhaustion
+                    // without waiting for the reactive 128-node limit.
+                    {
+                        let node_count = self.replay_stage.fork_tree().node_count();
+                        let soft_limit = if catching_up { 48 } else { 128 };
+                        let should_advance = if catching_up {
+                            // During catch-up, check every slot
+                            node_count > soft_limit
+                        } else {
+                            // Steady state: check every 32 slots
+                            self.current_slot.is_multiple_of(32) && node_count > soft_limit
+                        };
+                        if should_advance {
+                            let best = self.replay_stage.fork_tree().best_slot();
+                            let ancestry = self.replay_stage.fork_tree().get_ancestry(best);
+                            if ancestry.len() > 4 {
+                                let proposed = ancestry[ancestry.len() / 2];
+                                tracing::info!(
+                                    proposed,
+                                    node_count,
+                                    best,
+                                    catching_up,
+                                    "proactive root advancement"
+                                );
+                                self.try_advance_root(proposed, catching_up)?;
+                                metrics::counter!("nusantara_proactive_root_advances").increment(1);
+                            }
+                        }
+                    }
+
+                    // Proactive repair: when catching up, request sequential
+                    // slots even if no orphans have triggered repair yet.
+                    // This bootstraps the repair pipeline for fresh containers.
+                    if catching_up {
+                        self.request_missing_slots(0);
                     }
 
                     self.submit_vote(self.current_slot);
@@ -337,10 +417,11 @@ impl ValidatorNode {
 
         // 6. Feed into ReplayStage for fork tree tracking
         let result = self.replay_stage.replay_block(&block, &[])?;
+        self.replay_tip_shared.store(self.current_slot, Ordering::Relaxed);
 
-        // Defer root advancement
+        // Defer root advancement (leader is never catching up for its own blocks)
         if let Some(root) = result.new_root {
-            self.try_advance_root(root)?;
+            self.try_advance_root(root, false)?;
         }
 
         // 7. Publish pubsub events immediately after replay (before broadcast)
@@ -429,39 +510,48 @@ impl ValidatorNode {
         &mut self,
         block_rx: &mut mpsc::Receiver<Block>,
         leader_timeout_ms: u64,
+        catching_up: bool,
     ) -> Result<(), ValidatorError> {
-        let timeout = Duration::from_millis(leader_timeout_ms);
         let mut blocks = Vec::new();
 
-        // Wait for at least one block with timeout
-        match tokio::time::timeout(timeout, block_rx.recv()).await {
-            Ok(Some(block)) => blocks.push(block),
-            Ok(None) => return Err(ValidatorError::Shutdown),
-            Err(_) => {} // timeout — no block arrived
-        }
-
-        // Drain additional available blocks (non-blocking)
-        while let Ok(block) = block_rx.try_recv() {
-            blocks.push(block);
+        if leader_timeout_ms == 0 {
+            // Catch-up mode: non-blocking drain only, no waiting.
+            while let Ok(block) = block_rx.try_recv() {
+                blocks.push(block);
+            }
+        } else {
+            // Steady state: wait for at least one block with timeout.
+            let timeout = Duration::from_millis(leader_timeout_ms);
+            match tokio::time::timeout(timeout, block_rx.recv()).await {
+                Ok(Some(block)) => blocks.push(block),
+                Ok(None) => return Err(ValidatorError::Shutdown),
+                Err(_) => {} // timeout — no block arrived
+            }
+            // Drain additional available blocks (non-blocking)
+            while let Ok(block) = block_rx.try_recv() {
+                blocks.push(block);
+            }
         }
 
         if blocks.is_empty() {
-            let skips = self.consecutive_skips.fetch_add(1, Ordering::Relaxed) + 1;
-            self.total_skips += 1;
-            warn!(
-                slot = self.current_slot,
-                consecutive_skips = skips,
-                "no block received (leader skip)"
-            );
-            if skips > 10 {
+            if !catching_up {
+                let skips = self.consecutive_skips.fetch_add(1, Ordering::Relaxed) + 1;
+                self.total_skips += 1;
                 warn!(
+                    slot = self.current_slot,
                     consecutive_skips = skips,
-                    "possible network partition — many consecutive leader skips"
+                    "no block received (leader skip)"
                 );
+                if skips > 10 {
+                    warn!(
+                        consecutive_skips = skips,
+                        "possible network partition — many consecutive leader skips"
+                    );
+                }
+                metrics::counter!("nusantara_leader_skips").increment(1);
+                metrics::gauge!("nusantara_consecutive_skips").set(skips as f64);
             }
-            metrics::counter!("nusantara_leader_skips").increment(1);
             metrics::counter!("nusantara_non_leader_slots").increment(1);
-            metrics::gauge!("nusantara_consecutive_skips").set(skips as f64);
             return Ok(());
         }
 
@@ -474,6 +564,29 @@ impl ValidatorNode {
         }
 
         self.process_orphan_queue()?;
+
+        // During catch-up, do a second drain pass — replaying blocks may
+        // have unblocked orphans, and new blocks may have arrived from
+        // repair/retransmit while we were replaying.
+        if catching_up {
+            let mut extra = Vec::new();
+            while let Ok(block) = block_rx.try_recv() {
+                extra.push(block);
+            }
+            if !extra.is_empty() {
+                extra.sort_by_key(|b| b.header.slot);
+                metrics::counter!("nusantara_catchup_blocks_replayed").increment(extra.len() as u64);
+                for block in extra {
+                    self.replay_or_buffer_block(block)?;
+                }
+                self.process_orphan_queue()?;
+            }
+            // Yield to let background services (repair, retransmit) run
+            if self.current_slot.is_multiple_of(64) {
+                tokio::task::yield_now().await;
+            }
+        }
+
         metrics::counter!("nusantara_non_leader_slots").increment(1);
         Ok(())
     }

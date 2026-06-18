@@ -103,6 +103,10 @@ impl SlotShreds {
 pub struct ShredCollector {
     slots: DashMap<u64, SlotShreds>,
     stored_slots: DashMap<u64, ()>,
+    /// Slots known to be empty/skipped — blocks `request_slot_repair()` but
+    /// NOT `insert_data_shred()` or `insert_header()`, so turbine can still
+    /// deliver shreds if the slot turns out to have a block.
+    skip_repair_slots: DashMap<u64, ()>,
 }
 
 impl ShredCollector {
@@ -110,12 +114,19 @@ impl ShredCollector {
         Self {
             slots: DashMap::new(),
             stored_slots: DashMap::new(),
+            skip_repair_slots: DashMap::new(),
         }
     }
 
     pub fn mark_slot_stored(&self, slot: u64) {
         self.stored_slots.insert(slot, ());
         self.slots.remove(&slot);
+    }
+
+    /// Mark a slot as "known empty" — repair won't re-request it, but
+    /// turbine shreds are still accepted if the slot has a block.
+    pub fn mark_slot_empty(&self, slot: u64) {
+        self.skip_repair_slots.insert(slot, ());
     }
 
     pub fn is_slot_stored(&self, slot: u64) -> bool {
@@ -276,6 +287,9 @@ impl ShredCollector {
         if self.stored_slots.contains_key(&slot) {
             return;
         }
+        if self.skip_repair_slots.contains_key(&slot) {
+            return;
+        }
         self.slots.entry(slot).or_insert_with(SlotShreds::new);
     }
 
@@ -300,6 +314,16 @@ impl ShredCollector {
             .collect();
         for slot in old_stored {
             self.stored_slots.remove(&slot);
+        }
+
+        let old_skip: Vec<u64> = self
+            .skip_repair_slots
+            .iter()
+            .filter(|e| *e.key() < cutoff)
+            .map(|e| *e.key())
+            .collect();
+        for slot in old_skip {
+            self.skip_repair_slots.remove(&slot);
         }
 
         if count > 0 {

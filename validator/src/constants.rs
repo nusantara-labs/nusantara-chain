@@ -6,14 +6,20 @@ use nusantara_consensus::leader_schedule::LeaderSchedule;
 /// PublicKey (1952) + SecretKey (4032) = 5984 raw bytes.
 pub(crate) const KEYPAIR_SIZE: usize = 1952 + 4032;
 
+/// Replay gap threshold (in slots) above which the validator enters catch-up
+/// mode: zero-timeout block drain, aggressive repair, relaxed root gates.
+/// 8 slots = 3.2s at 400ms/slot — triggers quickly to prevent gap growth.
+pub(crate) const CATCHUP_THRESHOLD: u64 = 8;
+
 /// Maximum age (in slots) for orphan blocks and fork branches before they are
 /// considered stale. Orphans older than this are evicted and no longer block
-/// root advancement. 32 slots = 12.8s at 400ms/slot.
-pub(crate) const ORPHAN_HORIZON: u64 = 32;
+/// root advancement. 1024 slots = 409.6s at 400ms/slot — enough headroom
+/// for followers to catch up from large gaps without losing blocks.
+pub(crate) const ORPHAN_HORIZON: u64 = 1024;
 
 /// Safety valve for root advancement: if the gap between proposed and current
 /// root exceeds this, force-advance bypassing orphan/fork gates.
-pub(crate) const MAX_ROOT_GAP: u64 = 64;
+pub(crate) const MAX_ROOT_GAP: u64 = 32;
 
 /// Purge old slash detector entries every N slots.
 pub(crate) const SLASH_PURGE_INTERVAL: u64 = 100;
@@ -37,7 +43,7 @@ pub(crate) const RECENT_BLOCKHASHES_COUNT: usize = 300;
 pub(crate) const CLUSTER_INFO_TIMEOUT_MS: u64 = 60_000;
 
 /// Maximum number of buffered orphan blocks before eviction.
-pub(crate) const MAX_ORPHAN_BUFFER_SIZE: usize = 256;
+pub(crate) const MAX_ORPHAN_BUFFER_SIZE: usize = 4096;
 
 /// Maximum number of slots in a single vote batch.
 pub(crate) const MAX_VOTE_BATCH: u64 = 32;

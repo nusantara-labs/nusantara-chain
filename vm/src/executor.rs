@@ -102,19 +102,25 @@ impl WasmExecutor {
         let mut linker: Linker<()> = Linker::new(engine);
         syscall::link_all(&mut linker, engine)?;
 
-        // 6. Instantiate -- reject modules with a start function.
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| VmError::Instantiation(e.to_string()))?
-            .ensure_no_start(&mut store)
-            .map_err(|_| VmError::HasStartFunction)?;
+        // 6. Reject modules with a start function before instantiating, since
+        //    `instantiate_and_start` would otherwise run it. wasmi 1.x no longer
+        //    exposes a pre-instantiation guard, so we scan the section table.
+        if crate::validate::has_start_section(bytecode) {
+            return Err(VmError::HasStartFunction);
+        }
 
-        // 7. Obtain the exported memory.
+        // 7. Instantiate. No start function is present (checked above), so
+        //    `instantiate_and_start` will not execute any code here.
+        let instance = linker
+            .instantiate_and_start(&mut store, &module)
+            .map_err(|e| VmError::Instantiation(e.to_string()))?;
+
+        // 8. Obtain the exported memory.
         let memory = instance
             .get_memory(&store, "memory")
             .ok_or(VmError::MissingMemory)?;
 
-        // 8. Write instruction data into WASM linear memory.
+        // 9. Write instruction data into WASM linear memory.
         let data_offset = host_state.heap_offset;
         let data_len = instruction_data.len() as u32;
         if !instruction_data.is_empty() {
@@ -127,7 +133,7 @@ impl WasmExecutor {
         }
         host_state.heap_offset += data_len;
 
-        // 9. Write program ID (64 bytes) into WASM linear memory.
+        // 10. Write program ID (64 bytes) into WASM linear memory.
         let num_accounts = host_state.account_indices.len() as i32;
         let program_id_offset = host_state.heap_offset;
         memory
@@ -142,7 +148,7 @@ impl WasmExecutor {
             })?;
         host_state.heap_offset += 64;
 
-        // 10. Resolve the entrypoint and call it.
+        // 11. Resolve the entrypoint and call it.
         let entrypoint = instance
             .get_typed_func::<(i32, i32, i32, i32), i64>(&store, "entrypoint")
             .map_err(|_| VmError::MissingEntrypoint)?;

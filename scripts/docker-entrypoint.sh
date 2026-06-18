@@ -8,7 +8,7 @@ GENESIS_LEDGER="${GENESIS_LEDGER:-/genesis/ledger}"
 if [ "${INIT_ONLY:-false}" = "true" ]; then
     # Generate keypairs for each validator into /genesis/
     # The genesis builder binds "generate" identities to these in order
-    for i in 1 2 3; do
+    for i in 1 2 3 4; do
         KEYFILE="/genesis/validator${i}.key"
         if [ ! -f "$KEYFILE" ]; then
             nusantara-validator --generate-keypair "$KEYFILE"
@@ -19,7 +19,7 @@ if [ "${INIT_ONLY:-false}" = "true" ]; then
     exec nusantara-validator --ledger-path "$LEDGER_PATH" \
         --genesis-config /etc/nusantara/genesis.toml --init-only \
         --identity=/genesis/validator1.key \
-        --extra-validator-keys "/genesis/validator2.key,/genesis/validator3.key"
+        --extra-validator-keys "/genesis/validator2.key,/genesis/validator3.key,/genesis/validator4.key"
 fi
 
 # Wait for shared genesis ledger if our ledger doesn't exist yet

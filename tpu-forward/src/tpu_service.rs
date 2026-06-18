@@ -74,7 +74,7 @@ impl TpuService {
         let cert = rcgen::generate_simple_self_signed(vec!["nusantara".to_string()])
             .map_err(|e| TpuError::Tls(e.to_string()))?;
 
-        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
 
         let server_config =

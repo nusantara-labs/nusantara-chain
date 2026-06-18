@@ -42,7 +42,7 @@ pub fn weighted_shuffle(stakes: &[(Hash, u64)], seed: &Hash) -> Vec<usize> {
         })
         .collect();
 
-    weighted.sort_by(|a, b| b.1.cmp(&a.1));
+    weighted.sort_by_key(|b| std::cmp::Reverse(b.1));
     weighted.into_iter().map(|(i, _)| i).collect()
 }
 

@@ -68,6 +68,11 @@ pub struct ValidatorNode {
     pub(crate) consecutive_skips: Arc<AtomicU64>,
     pub(crate) total_skips: u64,
 
+    // Replay progress counter shared with background services (repair, retransmit).
+    // Updated after every successful block replay; used for eviction decisions
+    // instead of wall-clock current_slot to prevent catch-up death spirals.
+    pub(crate) replay_tip_shared: Arc<AtomicU64>,
+
     // Gossip vote cursor (F4)
     pub(crate) gossip_vote_cursor: u64,
 
@@ -104,6 +109,10 @@ pub struct ValidatorNode {
     // When `Some(parent)` and the new parent == parent + 1 (linear extension),
     // we skip the expensive account index rewind (no fork switch occurred).
     pub(crate) last_produced_parent: Option<u64>,
+
+    // Dedup: skip fork switch if the target is the same as last attempt.
+    // Reset to None when root advances (fork landscape genuinely changes).
+    pub(crate) last_fork_switch_target: Option<u64>,
 
     // Maximum transactions to drain from mempool per slot
     pub(crate) max_txs_per_slot: usize,
