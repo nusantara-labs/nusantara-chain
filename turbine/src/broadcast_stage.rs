@@ -52,22 +52,26 @@ impl BroadcastStage {
             "broadcasting block shreds"
         );
 
-        // Send ShredBatchHeader FIRST
-        let header_msg = crate::protocol::TurbineMessage::ShredBatchHeader(batch.header.clone());
-        if let Ok(bytes) = header_msg.serialize_to_bytes() {
-            for addr in &peer_addrs {
-                if let Err(e) = self.socket.send_to(&bytes, addr).await {
-                    debug!(%addr, error = %e, "failed to send batch header");
-                }
+        // Send ShredBatchHeader FIRST — errors are bubbled so callers know
+        // peers cannot verify shreds without the header.
+        let header_msg =
+            crate::protocol::TurbineMessage::ShredBatchHeader(batch.header.clone());
+        let header_bytes = header_msg
+            .serialize_to_bytes()
+            .map_err(TurbineError::BlockSerialization)?;
+        for addr in &peer_addrs {
+            if let Err(e) = self.socket.send_to(&header_bytes, addr).await {
+                debug!(%addr, error = %e, "failed to send batch header");
             }
         }
 
-        // Pre-serialize all shred messages
-        let mut serialized_shreds =
-            Vec::with_capacity(batch.data_shreds.len() + batch.code_shreds.len());
+        // Pre-serialize all shred messages, consuming the batch iterators to
+        // avoid cloning every shred just to wrap it in MerkleShred.
+        let total = batch.data_shreds.len() + batch.code_shreds.len();
+        let mut serialized_shreds = Vec::with_capacity(total);
 
-        for shred in &batch.data_shreds {
-            let msg = crate::protocol::TurbineMessage::Shred(MerkleShred::Data(shred.clone()));
+        for shred in batch.data_shreds.into_iter() {
+            let msg = crate::protocol::TurbineMessage::Shred(MerkleShred::Data(shred));
             match msg.serialize_to_bytes() {
                 Ok(bytes) => serialized_shreds.push(bytes),
                 Err(e) => {
@@ -76,8 +80,8 @@ impl BroadcastStage {
             }
         }
 
-        for shred in &batch.code_shreds {
-            let msg = crate::protocol::TurbineMessage::Shred(MerkleShred::Code(shred.clone()));
+        for shred in batch.code_shreds.into_iter() {
+            let msg = crate::protocol::TurbineMessage::Shred(MerkleShred::Code(shred));
             match msg.serialize_to_bytes() {
                 Ok(bytes) => serialized_shreds.push(bytes),
                 Err(e) => {
@@ -97,7 +101,7 @@ impl BroadcastStage {
 
         metrics::counter!("nusantara_turbine_broadcast_total").increment(1);
         metrics::histogram!("nusantara_turbine_shreds_per_broadcast")
-            .record((batch.data_shreds.len() + batch.code_shreds.len()) as f64);
+            .record((serialized_shreds.len()) as f64);
 
         Ok(())
     }

@@ -1,6 +1,14 @@
+use std::sync::OnceLock;
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use nusantara_crypto::{Hash, Keypair, MerkleProof, PublicKey, Signature, hash as crypto_hash};
 use nusantara_storage::shred::{CodeShred, DataShred};
+
+use crate::error::TurbineError;
+
+/// Flag set on the last data shred of a slot.
+/// Shared constant used by shredder, deshredder, and collector.
+pub const LAST_SHRED_FLAG: u8 = 0x01;
 
 /// Sent once per slot — contains the Merkle root signed by the leader.
 #[derive(Clone, Debug)]
@@ -67,13 +75,40 @@ impl ShredBatchHeader {
 }
 
 /// Data shred with a Merkle proof instead of a full Dilithium3 signature.
-#[derive(Clone, Debug)]
+///
+/// # Cache invariant
+/// `cached_bytes` is a `OnceLock` populated lazily by `shred_bytes()` and
+/// `shred_hash()`. The `shred` field is `pub(crate)` to prevent external
+/// mutation that would desync the cache. If you need to produce a modified
+/// shred, construct a new `MerkleDataShred` via `new()`.
+#[derive(Debug)]
 pub struct MerkleDataShred {
-    pub shred: DataShred,
+    pub(crate) shred: DataShred,
     pub leader: Hash,
     pub merkle_proof: MerkleProof,
-    /// Cached borsh serialization of `shred` — NOT serialized over the wire.
-    cached_bytes: Vec<u8>,
+    /// Lazily populated Borsh serialization of `shred`. Not serialized on the wire.
+    cached_bytes: OnceLock<Vec<u8>>,
+}
+
+impl Clone for MerkleDataShred {
+    fn clone(&self) -> Self {
+        Self {
+            shred: self.shred.clone(),
+            leader: self.leader,
+            merkle_proof: self.merkle_proof.clone(),
+            // Clone the cached bytes if already populated, otherwise leave empty
+            // so the clone's OnceLock is re-populated lazily on first access.
+            cached_bytes: self
+                .cached_bytes
+                .get()
+                .map(|b| {
+                    let cell = OnceLock::new();
+                    let _ = cell.set(b.clone());
+                    cell
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 impl PartialEq for MerkleDataShred {
@@ -100,22 +135,30 @@ impl BorshDeserialize for MerkleDataShred {
         let shred = DataShred::deserialize_reader(reader)?;
         let leader = Hash::deserialize_reader(reader)?;
         let merkle_proof = MerkleProof::deserialize_reader(reader)?;
-        let cached_bytes = borsh::to_vec(&shred)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // cached_bytes populated lazily on first access — no re-serialization here.
         Ok(Self {
             shred,
             leader,
             merkle_proof,
-            cached_bytes,
+            cached_bytes: OnceLock::new(),
         })
     }
 }
 
 impl MerkleDataShred {
     /// Create a new MerkleDataShred without a proof yet (proof attached later).
-    pub fn new(shred: DataShred, leader: Hash) -> Self {
-        let cached_bytes = borsh::to_vec(&shred).expect("shred serialization cannot fail");
-        Self {
+    ///
+    /// Pre-serializes the inner `DataShred` at construction time so that
+    /// `shred_bytes()` is infallible on the hot path (FEC encode, Merkle hash).
+    /// Returns `Err` if Borsh serialization fails — this surfaces the error at
+    /// the call site (shredder) rather than panicking inside a hot-path closure.
+    pub fn new(shred: DataShred, leader: Hash) -> Result<Self, TurbineError> {
+        let bytes = borsh::to_vec(&shred)
+            .map_err(|e| TurbineError::Borsh(e.to_string()))?;
+        let cached_bytes = OnceLock::new();
+        // Infallible: we just created the cell and it is empty.
+        let _ = cached_bytes.set(bytes);
+        Ok(Self {
             shred,
             leader,
             merkle_proof: MerkleProof {
@@ -123,22 +166,45 @@ impl MerkleDataShred {
                 path: Vec::new(),
             },
             cached_bytes,
-        }
+        })
     }
 
     /// Hash of this shred — the leaf value for Merkle tree construction.
-    pub fn shred_hash(&self) -> Hash {
-        crypto_hash(&self.cached_bytes)
+    ///
+    /// Propagates any serialization error from the lazy-populated cache
+    /// (only reachable for deserialized shreds whose inner bytes were never
+    /// pre-computed).
+    pub fn shred_hash(&self) -> Result<Hash, TurbineError> {
+        Ok(crypto_hash(self.shred_bytes()?))
     }
 
     /// Verify the Merkle proof against a known root.
+    /// Returns `false` on serialization failure (treats it as invalid).
     pub fn verify(&self, merkle_root: &Hash) -> bool {
-        self.merkle_proof.verify(&self.shred_hash(), merkle_root)
+        match self.shred_hash() {
+            Ok(h) => self.merkle_proof.verify(&h, merkle_root),
+            Err(_) => false,
+        }
     }
 
     /// Access the cached serialized shred bytes (for FEC encoding).
-    pub fn shred_bytes(&self) -> &[u8] {
-        &self.cached_bytes
+    ///
+    /// For instances created via `new()`, the bytes are pre-populated and this
+    /// is a simple pointer return. For instances created via `BorshDeserialize`,
+    /// the bytes are computed lazily on first call.
+    ///
+    /// Returns `Err` only on the lazy-path if Borsh serialization fails.
+    pub fn shred_bytes(&self) -> Result<&[u8], TurbineError> {
+        // Fast path: already populated (new() or prior lazy call).
+        if let Some(b) = self.cached_bytes.get() {
+            return Ok(b);
+        }
+        // Lazy path: deserialized shred — compute and cache.
+        let bytes = borsh::to_vec(&self.shred)
+            .map_err(|e| TurbineError::Borsh(e.to_string()))?;
+        // Another thread may have raced us; get() after set() returns whichever won.
+        let _ = self.cached_bytes.set(bytes);
+        Ok(self.cached_bytes.get().expect("just set above or already present"))
     }
 
     pub fn slot(&self) -> u64 {
@@ -150,17 +216,39 @@ impl MerkleDataShred {
     }
 
     pub fn is_last(&self) -> bool {
-        self.shred.flags & 0x01 != 0
+        self.shred.flags & LAST_SHRED_FLAG != 0
     }
 }
 
 /// Code shred with a Merkle proof instead of a full Dilithium3 signature.
-#[derive(Clone, Debug)]
+///
+/// # Cache invariant
+/// Same as `MerkleDataShred` — `shred` is `pub(crate)`, `cached_bytes` is lazy.
+#[derive(Debug)]
 pub struct MerkleCodeShred {
-    pub shred: CodeShred,
+    pub(crate) shred: CodeShred,
     pub leader: Hash,
     pub merkle_proof: MerkleProof,
-    cached_bytes: Vec<u8>,
+    cached_bytes: OnceLock<Vec<u8>>,
+}
+
+impl Clone for MerkleCodeShred {
+    fn clone(&self) -> Self {
+        Self {
+            shred: self.shred.clone(),
+            leader: self.leader,
+            merkle_proof: self.merkle_proof.clone(),
+            cached_bytes: self
+                .cached_bytes
+                .get()
+                .map(|b| {
+                    let cell = OnceLock::new();
+                    let _ = cell.set(b.clone());
+                    cell
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 impl PartialEq for MerkleCodeShred {
@@ -187,21 +275,24 @@ impl BorshDeserialize for MerkleCodeShred {
         let shred = CodeShred::deserialize_reader(reader)?;
         let leader = Hash::deserialize_reader(reader)?;
         let merkle_proof = MerkleProof::deserialize_reader(reader)?;
-        let cached_bytes = borsh::to_vec(&shred)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok(Self {
             shred,
             leader,
             merkle_proof,
-            cached_bytes,
+            cached_bytes: OnceLock::new(),
         })
     }
 }
 
 impl MerkleCodeShred {
-    pub fn new(shred: CodeShred, leader: Hash) -> Self {
-        let cached_bytes = borsh::to_vec(&shred).expect("shred serialization cannot fail");
-        Self {
+    /// Pre-serializes the inner `CodeShred` at construction time.
+    /// Returns `Err` if Borsh serialization fails.
+    pub fn new(shred: CodeShred, leader: Hash) -> Result<Self, TurbineError> {
+        let bytes = borsh::to_vec(&shred)
+            .map_err(|e| TurbineError::Borsh(e.to_string()))?;
+        let cached_bytes = OnceLock::new();
+        let _ = cached_bytes.set(bytes);
+        Ok(Self {
             shred,
             leader,
             merkle_proof: MerkleProof {
@@ -209,19 +300,28 @@ impl MerkleCodeShred {
                 path: Vec::new(),
             },
             cached_bytes,
-        }
+        })
     }
 
-    pub fn shred_hash(&self) -> Hash {
-        crypto_hash(&self.cached_bytes)
+    pub fn shred_hash(&self) -> Result<Hash, TurbineError> {
+        Ok(crypto_hash(self.shred_bytes()?))
     }
 
     pub fn verify(&self, merkle_root: &Hash) -> bool {
-        self.merkle_proof.verify(&self.shred_hash(), merkle_root)
+        match self.shred_hash() {
+            Ok(h) => self.merkle_proof.verify(&h, merkle_root),
+            Err(_) => false,
+        }
     }
 
-    pub fn shred_bytes(&self) -> &[u8] {
-        &self.cached_bytes
+    pub fn shred_bytes(&self) -> Result<&[u8], TurbineError> {
+        if let Some(b) = self.cached_bytes.get() {
+            return Ok(b);
+        }
+        let bytes = borsh::to_vec(&self.shred)
+            .map_err(|e| TurbineError::Borsh(e.to_string()))?;
+        let _ = self.cached_bytes.set(bytes);
+        Ok(self.cached_bytes.get().expect("just set above or already present"))
     }
 
     pub fn slot(&self) -> u64 {
@@ -262,6 +362,7 @@ impl MerkleShred {
     }
 
     /// Verify the Merkle proof against a known root.
+    /// Returns `false` on serialization failure (treats corrupted shred as invalid).
     pub fn verify(&self, merkle_root: &Hash) -> bool {
         match self {
             Self::Data(s) => s.verify(merkle_root),
@@ -302,15 +403,15 @@ mod tests {
             index: 3,
             parent_offset: 1,
             data: vec![99u8; 50],
-            flags: 0x01,
+            flags: LAST_SHRED_FLAG,
         };
         let leader = hash(b"leader");
-        let merkle_data = MerkleDataShred::new(shred, leader);
+        let merkle_data = MerkleDataShred::new(shred, leader).unwrap();
 
         let bytes = borsh::to_vec(&merkle_data).unwrap();
         let decoded: MerkleDataShred = borsh::from_slice(&bytes).unwrap();
         assert_eq!(merkle_data, decoded);
-        assert_eq!(merkle_data.shred_hash(), decoded.shred_hash());
+        assert_eq!(merkle_data.shred_hash().unwrap(), decoded.shred_hash().unwrap());
     }
 
     #[test]
@@ -324,7 +425,7 @@ mod tests {
             data: vec![0xAB; 100],
         };
         let leader = hash(b"leader");
-        let merkle_code = MerkleCodeShred::new(shred, leader);
+        let merkle_code = MerkleCodeShred::new(shred, leader).unwrap();
 
         let bytes = borsh::to_vec(&merkle_code).unwrap();
         let decoded: MerkleCodeShred = borsh::from_slice(&bytes).unwrap();
@@ -341,8 +442,8 @@ mod tests {
             data: vec![42u8; 100],
             flags: 0,
         };
-        let mut merkle_data = MerkleDataShred::new(shred, kp.address());
-        let leaf_hash = merkle_data.shred_hash();
+        let mut merkle_data = MerkleDataShred::new(shred, kp.address()).unwrap();
+        let leaf_hash = merkle_data.shred_hash().unwrap();
 
         let tree = MerkleTree::new(&[leaf_hash]);
         let proof = tree.proof(0).unwrap();
@@ -361,8 +462,8 @@ mod tests {
             data: vec![42u8; 100],
             flags: 0,
         };
-        let mut merkle_data = MerkleDataShred::new(shred, kp.address());
-        let leaf_hash = merkle_data.shred_hash();
+        let mut merkle_data = MerkleDataShred::new(shred, kp.address()).unwrap();
+        let leaf_hash = merkle_data.shred_hash().unwrap();
 
         let tree = MerkleTree::new(&[leaf_hash]);
         let proof = tree.proof(0).unwrap();
@@ -382,9 +483,9 @@ mod tests {
             flags: 0,
         };
         let leader = hash(b"leader");
-        let a = MerkleDataShred::new(shred.clone(), leader);
-        let b = MerkleDataShred::new(shred, leader);
-        assert_eq!(a.shred_hash(), b.shred_hash());
+        let a = MerkleDataShred::new(shred.clone(), leader).unwrap();
+        let b = MerkleDataShred::new(shred, leader).unwrap();
+        assert_eq!(a.shred_hash().unwrap(), b.shred_hash().unwrap());
     }
 
     #[test]
@@ -412,13 +513,49 @@ mod tests {
             index: 3,
             parent_offset: 1,
             data: vec![99u8; 50],
-            flags: 0x01,
+            flags: LAST_SHRED_FLAG,
         };
         let leader = hash(b"leader");
-        let merkle_data = MerkleDataShred::new(shred, leader);
+        let merkle_data = MerkleDataShred::new(shred, leader).unwrap();
         let ms = MerkleShred::Data(merkle_data);
         let bytes = borsh::to_vec(&ms).unwrap();
         let decoded: MerkleShred = borsh::from_slice(&bytes).unwrap();
         assert_eq!(ms, decoded);
+    }
+
+    #[test]
+    fn cached_bytes_lazy_population() {
+        let shred = DataShred {
+            slot: 1,
+            index: 0,
+            parent_offset: 0,
+            data: vec![1, 2, 3],
+            flags: 0,
+        };
+        let ms = MerkleDataShred::new(shred.clone(), hash(b"leader")).unwrap();
+        // First access returns pre-populated cache (from new())
+        let b1 = ms.shred_bytes().unwrap().to_vec();
+        // Second access returns same cached bytes
+        let b2 = ms.shred_bytes().unwrap().to_vec();
+        assert_eq!(b1, b2);
+        // Verify the bytes match manual serialization
+        let expected = borsh::to_vec(&shred).unwrap();
+        assert_eq!(b1, expected);
+    }
+
+    #[test]
+    fn deserialized_shred_cache_correct() {
+        let shred = DataShred {
+            slot: 7,
+            index: 2,
+            parent_offset: 1,
+            data: vec![0xAB; 64],
+            flags: 0,
+        };
+        let original = MerkleDataShred::new(shred, hash(b"leader")).unwrap();
+        let bytes = borsh::to_vec(&original).unwrap();
+        let decoded: MerkleDataShred = borsh::from_slice(&bytes).unwrap();
+        // Cache must produce the same hash as the original
+        assert_eq!(original.shred_hash().unwrap(), decoded.shred_hash().unwrap());
     }
 }

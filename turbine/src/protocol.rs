@@ -1,9 +1,16 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use nusantara_core::native_token::const_parse_u64;
 
 use crate::compression;
+use crate::error::TurbineError;
 use crate::merkle_shred::{MerkleShred, ShredBatchHeader};
 
 pub const MAX_UDP_PACKET: usize = 65507;
+
+/// Maximum number of shreds accepted from a single `BatchRepairResponse` packet.
+/// Prevents one packet from flooding the channel with unbounded channel sends.
+pub const MAX_BATCH_RESPONSE_SHREDS: usize =
+    const_parse_u64(env!("NUSA_TURBINE_MAX_BATCH_RESPONSE_SHREDS")) as usize;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum TurbineMessage {
@@ -31,21 +38,36 @@ pub struct BatchRepairResponse {
 
 impl BatchRepairResponse {
     /// Greedily pack shreds into UDP-safe chunks.
-    pub fn pack(slot: u64, shreds: Vec<MerkleShred>, max_packet_size: usize) -> Vec<Self> {
+    ///
+    /// Returns an error if a single shred exceeds `max_packet_size` — such a
+    /// shred can never fit and producing an oversize batch would corrupt the wire.
+    pub fn pack(
+        slot: u64,
+        shreds: Vec<MerkleShred>,
+        max_packet_size: usize,
+    ) -> Result<Vec<Self>, TurbineError> {
         if shreds.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let mut batches = Vec::new();
-        let mut current = Vec::new();
+        let mut current: Vec<MerkleShred> = Vec::new();
 
         // Estimate overhead: TurbineMessage enum tag (1) + slot (8) + vec length prefix (4)
-        let overhead = 13;
-
+        let overhead = 13usize;
         let mut current_size = overhead;
 
         for shred in shreds {
-            let shred_size = borsh::to_vec(&shred).map(|b| b.len()).unwrap_or(0);
+            let shred_size = shred_wire_size(&shred);
+
+            // A single shred that exceeds the MTU can never be packed — reject it
+            // rather than silently producing an oversize batch.
+            if shred_size > max_packet_size.saturating_sub(overhead) {
+                return Err(TurbineError::ShredTooLarge {
+                    size: shred_size + overhead,
+                    max_size: max_packet_size,
+                });
+            }
 
             if !current.is_empty() && current_size + shred_size > max_packet_size {
                 batches.push(BatchRepairResponse {
@@ -66,8 +88,46 @@ impl BatchRepairResponse {
             });
         }
 
-        batches
+        Ok(batches)
     }
+}
+
+/// Compute the Borsh-serialized size of a `MerkleShred` without performing a
+/// full serialization.
+///
+/// Layout for `MerkleShred::Data(MerkleDataShred)` (borsh is field-inline, no wrappers):
+///   - 1 byte   : MerkleShred enum variant tag
+///   - N bytes  : shred_bytes (the DataShred serialized inline — no extra length prefix;
+///     MerkleDataShred::serialize writes the struct fields directly)
+///   - 64 bytes : leader Hash (fixed 64-byte array)
+///   - 4 bytes  : proof.hashes Vec length prefix
+///   - M*64 bytes: proof hashes (each Hash is 64 bytes)
+///   - 4 bytes  : proof.path Vec length prefix
+///   - M bytes  : proof path entries (each is 1 byte, a u8 direction)
+///
+/// The same layout applies to `MerkleShred::Code`.
+///
+/// A test verifies this matches the actual `borsh::to_vec` output size.
+fn shred_wire_size(shred: &MerkleShred) -> usize {
+    let (shred_bytes_len, proof) = match shred {
+        MerkleShred::Data(s) => (
+            s.shred_bytes().map(|b| b.len()).unwrap_or(0),
+            &s.merkle_proof,
+        ),
+        MerkleShred::Code(s) => (
+            s.shred_bytes().map(|b| b.len()).unwrap_or(0),
+            &s.merkle_proof,
+        ),
+    };
+
+    let proof_hashes_bytes = 4 + proof.hashes.len() * 64; // 4-byte len prefix + 64 bytes per Hash
+    let proof_path_bytes = 4 + proof.path.len(); // 4-byte len prefix + 1 byte per path step
+
+    1                   // MerkleShred enum tag
+    + shred_bytes_len   // inline struct bytes (no extra Vec length prefix)
+    + 64                // leader Hash (fixed 64 bytes)
+    + proof_hashes_bytes
+    + proof_path_bytes
 }
 
 impl TurbineMessage {
@@ -97,13 +157,12 @@ mod tests {
             data,
             flags: 0,
         };
-        let data_shred = MerkleDataShred::new(shred, kp.address());
-        let hashes = vec![data_shred.shred_hash()];
+        let mut data_shred = MerkleDataShred::new(shred, kp.address()).unwrap();
+        let hashes = vec![data_shred.shred_hash().unwrap()];
         let tree = MerkleTree::new(&hashes);
         let proof = tree.proof(0).unwrap();
-        let mut s = data_shred;
-        s.merkle_proof = proof;
-        MerkleShred::Data(s)
+        data_shred.merkle_proof = proof;
+        MerkleShred::Data(data_shred)
     }
 
     #[test]
@@ -173,7 +232,7 @@ mod tests {
 
     #[test]
     fn batch_pack_empty() {
-        let batches = BatchRepairResponse::pack(1, Vec::new(), MAX_UDP_PACKET);
+        let batches = BatchRepairResponse::pack(1, Vec::new(), MAX_UDP_PACKET).unwrap();
         assert!(batches.is_empty());
     }
 
@@ -182,7 +241,7 @@ mod tests {
         let kp = Keypair::generate();
         let shred = make_merkle_shred(&kp, 1, 0, vec![0u8; 100]);
 
-        let batches = BatchRepairResponse::pack(1, vec![shred], MAX_UDP_PACKET);
+        let batches = BatchRepairResponse::pack(1, vec![shred], MAX_UDP_PACKET).unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].shreds.len(), 1);
     }
@@ -197,5 +256,41 @@ mod tests {
         let bytes = msg.serialize_to_bytes().unwrap();
         let decoded = TurbineMessage::deserialize_from_bytes(&bytes).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    /// Verify `shred_wire_size` matches the actual `borsh::to_vec` size.
+    #[test]
+    fn shred_wire_size_matches_borsh() {
+        let kp = Keypair::generate();
+        // Test with data shred of various sizes
+        for data_len in [0usize, 10, 100, 1000, 1228] {
+            let shred = make_merkle_shred(&kp, 1, 0, vec![0xAB; data_len]);
+            let actual = borsh::to_vec(&shred).unwrap().len();
+            let computed = shred_wire_size(&shred);
+            assert_eq!(
+                computed,
+                actual,
+                "shred_wire_size mismatch for data_len={data_len}: computed={computed} actual={actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn pack_rejects_oversize_single_shred() {
+        let kp = Keypair::generate();
+        // Create a shred that is large enough to exceed a tiny max_packet_size
+        let shred = make_merkle_shred(&kp, 1, 0, vec![0u8; 1000]);
+        // Set max_packet_size smaller than any shred can fit
+        let result = BatchRepairResponse::pack(1, vec![shred], 50);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TurbineError::ShredTooLarge { .. } => {}
+            e => panic!("expected ShredTooLarge, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn max_batch_response_shreds_constant() {
+        assert_eq!(MAX_BATCH_RESPONSE_SHREDS, 64);
     }
 }

@@ -2,17 +2,29 @@ use nusantara_core::block::Block;
 use nusantara_storage::shred::DataShred;
 
 use crate::error::TurbineError;
+use crate::merkle_shred::LAST_SHRED_FLAG;
 
 pub struct Deshredder;
 
 impl Deshredder {
     /// Reassemble a block from data shreds.
-    /// Shreds must be sorted by index and contiguous from 0.
+    /// Shreds must all share the same slot, be sorted by index, and be contiguous from 0.
     pub fn deshred(shreds: &[DataShred]) -> Result<Block, TurbineError> {
         if shreds.is_empty() {
             return Err(TurbineError::Deshredding(
                 "no shreds provided".to_string(),
             ));
+        }
+
+        // Verify all shreds share the same slot (item 23)
+        let slot = shreds[0].slot;
+        for shred in shreds {
+            if shred.slot != slot {
+                return Err(TurbineError::Deshredding(format!(
+                    "mixed slots in shred batch: expected slot {slot}, got {}",
+                    shred.slot
+                )));
+            }
         }
 
         // Verify contiguous indices
@@ -26,8 +38,8 @@ impl Deshredder {
         }
 
         // Verify last shred has the last flag
-        let last = shreds.last().unwrap();
-        if last.flags & 0x01 == 0 {
+        let last = shreds.last().expect("non-empty checked above");
+        if last.flags & LAST_SHRED_FLAG == 0 {
             return Err(TurbineError::Deshredding(
                 "last shred missing completion flag".to_string(),
             ));
@@ -42,7 +54,7 @@ impl Deshredder {
 
         // Deserialize block
         let block: Block = borsh::from_slice(&block_bytes)
-            .map_err(|e| TurbineError::Deserialization(e.to_string()))?;
+            .map_err(|e| TurbineError::Deshredding(e.to_string()))?;
 
         Ok(block)
     }
@@ -112,10 +124,34 @@ mod tests {
                 index: 2, // gap!
                 parent_offset: 1,
                 data: vec![0],
-                flags: 0x01,
+                flags: LAST_SHRED_FLAG,
             },
         ];
         let result = Deshredder::deshred(&shreds);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn mixed_slots_error() {
+        let shreds = vec![
+            DataShred {
+                slot: 1,
+                index: 0,
+                parent_offset: 1,
+                data: vec![0],
+                flags: 0,
+            },
+            DataShred {
+                slot: 2, // wrong slot
+                index: 1,
+                parent_offset: 1,
+                data: vec![0],
+                flags: LAST_SHRED_FLAG,
+            },
+        ];
+        let result = Deshredder::deshred(&shreds);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("mixed slots"), "got: {msg}");
     }
 }

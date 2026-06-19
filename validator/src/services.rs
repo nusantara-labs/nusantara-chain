@@ -438,19 +438,20 @@ fn spawn_repair_responder(
                                                         .map(|s| MerkleShred::Data(s.clone()))
                                                 })
                                                 .collect();
-                                            let batches = BatchRepairResponse::pack(
+                                            if let Ok(batches) = BatchRepairResponse::pack(
                                                 slot,
                                                 shreds,
                                                 MAX_UDP_PACKET,
-                                            );
-                                            for batch in batches {
-                                                let msg = TurbineMessage::BatchRepairResponse(
-                                                    batch,
-                                                );
-                                                if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                    let _ = socket
-                                                        .send_to(&bytes, src)
-                                                        .await;
+                                            ) {
+                                                for batch in batches {
+                                                    let msg = TurbineMessage::BatchRepairResponse(
+                                                        batch,
+                                                    );
+                                                    if let Ok(bytes) = msg.serialize_to_bytes() {
+                                                        let _ = socket
+                                                            .send_to(&bytes, src)
+                                                            .await;
+                                                    }
                                                 }
                                             }
                                         }
@@ -483,19 +484,20 @@ fn spawn_repair_responder(
                                                 .iter()
                                                 .map(|s| MerkleShred::Data(s.clone()))
                                                 .collect();
-                                            let batches = BatchRepairResponse::pack(
+                                            if let Ok(batches) = BatchRepairResponse::pack(
                                                 slot,
                                                 shreds,
                                                 MAX_UDP_PACKET,
-                                            );
-                                            for batch in batches {
-                                                let msg = TurbineMessage::BatchRepairResponse(
-                                                    batch,
-                                                );
-                                                if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                    let _ = socket
-                                                        .send_to(&bytes, src)
-                                                        .await;
+                                            ) {
+                                                for batch in batches {
+                                                    let msg = TurbineMessage::BatchRepairResponse(
+                                                        batch,
+                                                    );
+                                                    if let Ok(bytes) = msg.serialize_to_bytes() {
+                                                        let _ = socket
+                                                            .send_to(&bytes, src)
+                                                            .await;
+                                                    }
                                                 }
                                             }
                                         }

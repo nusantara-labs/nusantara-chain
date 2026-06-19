@@ -5,11 +5,8 @@ pub enum TurbineError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
-    #[error("deserialization error: {0}")]
-    Deserialization(String),
+    #[error("borsh error: {0}")]
+    Borsh(String),
 
     #[error("signature verification failed for shred slot={slot} index={index}")]
     ShredSignatureVerification { slot: u64, index: u32 },

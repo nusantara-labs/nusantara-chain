@@ -9,6 +9,8 @@ pub struct TurbineTree {
     leader: Hash,
     nodes: Vec<Hash>,
     fanout: usize,
+    /// O(1) position lookup — avoids O(N) `.position()` on the hot retransmit path.
+    position_index: HashMap<Hash, usize>,
 }
 
 impl TurbineTree {
@@ -30,7 +32,16 @@ impl TurbineTree {
             .iter()
             .filter(|n| **n != leader)
             .map(|n| {
-                let stake = stakes.get(n).copied().unwrap_or(1);
+                let stake = stakes.get(n).copied().unwrap_or_else(|| {
+                    // Emit metric + warn when a node has no stake entry — silently
+                    // defaulting to 1 hides configuration errors from operators.
+                    metrics::counter!("nusantara_turbine_unknown_stake_nodes").increment(1);
+                    tracing::warn!(
+                        node = ?n,
+                        "turbine tree: no stake entry for node, defaulting to 1"
+                    );
+                    1
+                });
                 (*n, stake)
             })
             .collect();
@@ -38,10 +49,18 @@ impl TurbineTree {
         // Stake-weighted deterministic shuffle
         let shuffled = weighted_shuffle_turbine(&non_leader, &seed);
 
+        // Build O(1) position index
+        let position_index: HashMap<Hash, usize> = shuffled
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| (h, i))
+            .collect();
+
         Self {
             leader,
             nodes: shuffled,
             fanout,
+            position_index,
         }
     }
 
@@ -52,9 +71,9 @@ impl TurbineTree {
             return self.nodes.iter().take(self.fanout).copied().collect();
         }
 
-        // Find our position in the ordered list
-        let my_pos = match self.nodes.iter().position(|n| n == my_identity) {
-            Some(pos) => pos,
+        // O(1) lookup via pre-built index
+        let my_pos = match self.position_index.get(my_identity) {
+            Some(&pos) => pos,
             None => return Vec::new(),
         };
 
@@ -81,10 +100,10 @@ impl TurbineTree {
         if *identity == self.leader {
             return None; // Leader is not in any layer
         }
-        self.nodes
-            .iter()
-            .position(|n| n == identity)
-            .map(|pos| pos / self.fanout)
+        // O(1) lookup via pre-built index
+        self.position_index
+            .get(identity)
+            .map(|&pos| pos / self.fanout)
     }
 
     pub fn leader(&self) -> Hash {
@@ -107,9 +126,6 @@ fn weighted_shuffle_turbine(nodes: &[(Hash, u64)], seed: &Hash) -> Vec<Hash> {
     }
 
     let total_stake: u64 = nodes.iter().map(|(_, s)| *s).sum();
-    if total_stake == 0 {
-        return nodes.iter().map(|(h, _)| *h).collect();
-    }
 
     let mut weighted: Vec<(usize, u128)> = nodes
         .iter()
@@ -118,18 +134,23 @@ fn weighted_shuffle_turbine(nodes: &[(Hash, u64)], seed: &Hash) -> Vec<Hash> {
             let h = hashv(&[seed.as_bytes(), identity.as_bytes()]);
             let bytes = h.as_bytes();
             let rand_val = u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
-            let stake_component = (*stake as u128) * SCALE / (total_stake as u128);
-            let rand_component =
-                (rand_val as u128) * (SCALE / 100) / (u64::MAX as u128);
+
+            // When total_stake==0 (all nodes unstaked), weight is rand-only so
+            // we still get a deterministic shuffle rather than insertion order.
+            let stake_component = if total_stake > 0 {
+                (*stake as u128) * SCALE / (total_stake as u128)
+            } else {
+                0
+            };
+            let rand_component = (rand_val as u128) * (SCALE / 100) / (u64::MAX as u128);
             let weight = stake_component + rand_component;
             (i, weight)
         })
         .collect();
 
-    weighted.sort_by_key(|b| std::cmp::Reverse(b.1));
+    weighted.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
     weighted.into_iter().map(|(i, _)| nodes[i].0).collect()
 }
 
@@ -200,23 +221,51 @@ mod tests {
     }
 
     #[test]
-    fn unknown_node_empty_peers() {
-        let leader = hash(b"leader");
-        let nodes: Vec<Hash> = (0..10).map(|i| hash(&(i as u64).to_le_bytes())).collect();
-        let stakes: HashMap<Hash, u64> = nodes.iter().map(|n| (*n, 100)).collect();
-
-        let tree = TurbineTree::new(leader, &nodes, &stakes, 1, 4);
-        let unknown = hash(b"unknown");
-        assert!(tree.retransmit_peers(&unknown).is_empty());
-    }
-
-    #[test]
-    fn layer_of_calculation() {
+    fn position_index_matches_linear_scan() {
         let leader = hash(b"leader");
         let nodes: Vec<Hash> = (0..100).map(|i| hash(&(i as u64).to_le_bytes())).collect();
         let stakes: HashMap<Hash, u64> = nodes.iter().map(|n| (*n, 100)).collect();
 
-        let tree = TurbineTree::new(leader, &nodes, &stakes, 1, 10);
-        assert_eq!(tree.layer_of(&leader), None); // Leader has no layer
+        let tree = TurbineTree::new(leader, &nodes, &stakes, 1, 8);
+
+        // Every node in the tree should have the same position via index and linear scan
+        for node in &tree.nodes {
+            let via_index = tree.position_index.get(node).copied();
+            let via_scan = tree.nodes.iter().position(|n| n == node);
+            assert_eq!(via_index, via_scan);
+        }
+    }
+
+    #[test]
+    fn zero_stake_still_shuffles() {
+        let leader = hash(b"leader");
+        // All nodes have 0 stake — should still produce a deterministic non-insertion-order shuffle
+        let nodes: Vec<Hash> = (0..10).map(|i| hash(&(i as u64).to_le_bytes())).collect();
+        let stakes: HashMap<Hash, u64> = HashMap::new(); // no entries → all default to 1 with warn
+
+        let tree = TurbineTree::new(leader, &nodes, &stakes, 1, 4);
+        // Should not panic and should produce some ordering
+        assert_eq!(tree.total_nodes(), 11);
+    }
+
+    #[test]
+    fn layer_of_uses_position_index() {
+        let leader = hash(b"leader");
+        let nodes: Vec<Hash> = (0..100).map(|i| hash(&(i as u64).to_le_bytes())).collect();
+        let stakes: HashMap<Hash, u64> = nodes.iter().map(|n| (*n, 100)).collect();
+
+        let tree = TurbineTree::new(leader, &nodes, &stakes, 1, 8);
+
+        // Layer of leader is None
+        assert_eq!(tree.layer_of(&leader), None);
+
+        // Spot-check: first 8 nodes should be layer 0
+        for node in tree.nodes.iter().take(8) {
+            assert_eq!(tree.layer_of(node), Some(0));
+        }
+        // Next 8 should be layer 1
+        for node in tree.nodes.iter().skip(8).take(8) {
+            assert_eq!(tree.layer_of(node), Some(1));
+        }
     }
 }

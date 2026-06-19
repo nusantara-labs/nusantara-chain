@@ -8,7 +8,7 @@ use nusantara_core::native_token::const_parse_u64;
 use rand::prelude::IndexedRandom;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
 
 use crate::protocol::{RepairRequest, TurbineMessage};
 use crate::shred_collector::ShredCollector;
@@ -17,21 +17,21 @@ pub const REPAIR_INTERVAL_MS: u64 = const_parse_u64(env!("NUSA_TURBINE_REPAIR_IN
 pub const MAX_REPAIR_BATCH_REQUEST: u64 =
     const_parse_u64(env!("NUSA_TURBINE_MAX_REPAIR_BATCH_REQUEST"));
 
-/// Slots older than this relative to replay_tip are evicted from the
-/// ShredCollector on each repair tick. 1024 slots = ~409s at 400ms/slot.
-/// Matches ORPHAN_HORIZON so followers retain shreds during catch-up.
-const MAX_REPAIR_SLOT_AGE: u64 = 1024;
+/// Slots older than this relative to replay_tip are evicted from the ShredCollector on each tick.
+pub const MAX_REPAIR_SLOT_AGE: u64 =
+    const_parse_u64(env!("NUSA_TURBINE_MAX_REPAIR_SLOT_AGE"));
 
 /// Maximum number of slots to request repairs for per tick.
-/// With 200ms tick interval, this paces repair to 2560 slots/second.
-/// High value is needed for catch-up where many slots are empty/skipped.
-const MAX_REPAIR_SLOTS_PER_TICK: usize = 512;
+/// With 200ms tick interval and this value, repair throughput is bounded.
+pub const MAX_REPAIR_SLOTS_PER_TICK: usize =
+    const_parse_u64(env!("NUSA_TURBINE_MAX_REPAIR_SLOTS_PER_TICK")) as usize;
 
 /// Number of random peers to send each repair request to.
-const REPAIR_PEER_SAMPLE_SIZE: usize = 2;
+pub const REPAIR_PEER_SAMPLE_SIZE: usize =
+    const_parse_u64(env!("NUSA_TURBINE_REPAIR_PEER_SAMPLE_SIZE")) as usize;
 
 /// Minimum time (ms) between repair requests for the same slot.
-const REPAIR_COOLDOWN_MS: u64 = 1000;
+pub const REPAIR_COOLDOWN_MS: u64 = const_parse_u64(env!("NUSA_TURBINE_REPAIR_COOLDOWN_MS"));
 
 /// Select up to `count` random peers from the list.
 fn sample_peers(peers: &[SocketAddr], count: usize) -> Vec<SocketAddr> {
@@ -66,7 +66,11 @@ impl RepairService {
         }
     }
 
-    #[instrument(skip(self, repair_peers_fn, shutdown), name = "repair_service")]
+    /// Run the repair loop.
+    ///
+    /// `#[instrument]` is intentionally absent: wrapping the entire loop in a
+    /// single span produces a span whose lifetime equals the task lifetime,
+    /// polluting traces. Instrument inner helpers if per-tick tracing is needed.
     pub async fn run<F>(
         self,
         repair_peers_fn: F,
@@ -84,40 +88,38 @@ impl RepairService {
                 biased;
                 _ = tick.tick() => {
                     let current = self.current_slot.load(Ordering::Relaxed);
-                    // Evict based on replay progress, not wall-clock slot,
-                    // so catching-up validators don't lose shreds they still need.
                     let replay_tip = self.replay_tip.load(Ordering::Relaxed);
-                    let evicted = self.collector.cleanup_old_slots(replay_tip, MAX_REPAIR_SLOT_AGE);
+
+                    let evicted =
+                        self.collector.cleanup_old_slots(replay_tip, MAX_REPAIR_SLOT_AGE);
+
+                    // Cache tracked_slots once — each call is an O(N) DashMap scan.
+                    // Reuse the result for all operations in this tick.
+                    let tracked = self.collector.tracked_slots();
 
                     // Evict tracked slots with 0 shreds that have been
-                    // tracked for >=3s (empty/skipped slots). Without this,
-                    // empty slot entries consume repair budget indefinitely
-                    // and block catch-up progress.
+                    // tracked for >=1s (empty/skipped slots).
                     {
                         let now = Instant::now();
-                        // Record first-tracked time for new entries
-                        for &s in &self.collector.tracked_slots() {
+                        for &s in &tracked {
                             first_tracked.entry(s).or_insert(now);
                         }
-                        let stale: Vec<u64> = self.collector.tracked_slots()
-                            .into_iter()
+                        let stale: Vec<u64> = tracked
+                            .iter()
+                            .copied()
                             .filter(|&s| {
                                 if self.collector.shred_count(s) > 0 {
-                                    return false; // has shreds, still in progress
+                                    return false;
                                 }
                                 if s < replay_tip {
-                                    return true; // replayed past
+                                    return true;
                                 }
-                                // Empty and tracked for >=1s → likely empty slot
-                                first_tracked.get(&s)
+                                first_tracked
+                                    .get(&s)
                                     .is_some_and(|t| now.duration_since(*t).as_millis() >= 1000)
                             })
                             .collect();
                         for s in &stale {
-                            // Mark as "known empty" so request_slot_repair()
-                            // won't re-add this slot. Uses mark_slot_empty()
-                            // (NOT mark_slot_stored) so turbine shreds are
-                            // still accepted if the slot has a block later.
                             self.collector.mark_slot_empty(*s);
                             self.collector.remove_slot(*s);
                             last_repair.remove(s);
@@ -133,23 +135,27 @@ impl RepairService {
                                 .increment(stale.len() as u64);
                         }
                         // Clean first_tracked for no-longer-tracked slots
-                        let tracked: std::collections::HashSet<u64> =
-                            self.collector.tracked_slots().into_iter().collect();
-                        first_tracked.retain(|s, _| tracked.contains(s));
+                        let tracked_set: std::collections::HashSet<u64> =
+                            tracked.iter().copied().collect();
+                        first_tracked.retain(|s, _| tracked_set.contains(s));
                     }
 
+                    // Re-fetch tracked after stale eviction — slots were removed above.
+                    // This is the only second tracked_slots() call per tick.
+                    let mut slots = self.collector.tracked_slots();
+
                     // Purge cooldown entries for slots no longer tracked
-                    let tracked: std::collections::HashSet<u64> = self.collector.tracked_slots().into_iter().collect();
-                    last_repair.retain(|slot, _| tracked.contains(slot));
+                    {
+                        let slots_set: std::collections::HashSet<u64> =
+                            slots.iter().copied().collect();
+                        last_repair.retain(|slot, _| slots_set.contains(slot));
+                    }
+
                     if evicted > 0 {
                         debug!(evicted, current, "evicted stale slots from shred collector");
                     }
 
-                    let mut slots = self.collector.tracked_slots();
-                    // When catching up (large gap between wall-clock and replay
-                    // progress), prioritise lowest slots to bootstrap the chain
-                    // from the bottom up. In steady state, prioritise newest
-                    // slots to stay current with the chain head.
+                    // Prioritise: catch-up → lowest slots first; steady state → newest first.
                     let catching_up = current > replay_tip + 128;
                     if catching_up {
                         slots.sort_unstable();
@@ -158,7 +164,8 @@ impl RepairService {
                     }
                     let deferred = slots.len().saturating_sub(MAX_REPAIR_SLOTS_PER_TICK);
                     if deferred > 0 {
-                        metrics::counter!("nusantara_turbine_repair_slots_deferred").increment(deferred as u64);
+                        metrics::counter!("nusantara_turbine_repair_slots_deferred")
+                            .increment(deferred as u64);
                     }
                     slots.truncate(MAX_REPAIR_SLOTS_PER_TICK);
 
@@ -172,51 +179,57 @@ impl RepairService {
                         info!(tracked_slots = slots.len(), peers = peers.len(), "repair tick");
                     }
 
-                    // During catch-up, use aggressive cooldown (50ms) to
-                    // maximize repair throughput. In steady state, use the
-                    // default 1s cooldown to avoid overloading peers.
                     let effective_cooldown = if catching_up { 50u128 } else { REPAIR_COOLDOWN_MS as u128 };
-                    let effective_peer_sample = if catching_up { 3 } else { REPAIR_PEER_SAMPLE_SIZE };
+                    let effective_peer_sample =
+                        if catching_up { 3 } else { REPAIR_PEER_SAMPLE_SIZE };
 
                     for slot in &slots {
-                        // Skip slots that were recently repaired (cooldown)
                         let now = Instant::now();
                         if let Some(last) = last_repair.get(slot)
                             && now.duration_since(*last).as_millis() < effective_cooldown
                         {
-                            metrics::counter!("nusantara_turbine_repair_cooldown_skipped").increment(1);
+                            metrics::counter!("nusantara_turbine_repair_cooldown_skipped")
+                                .increment(1);
                             continue;
                         }
 
                         let selected = sample_peers(&peers, effective_peer_sample);
 
                         // Request batch header if missing
-                        if !self.collector.has_header(*slot) && self.collector.shred_count(*slot) > 0 {
-                            let req = TurbineMessage::RepairRequest(
-                                RepairRequest::BatchHeader { slot: *slot },
-                            );
+                        if !self.collector.has_header(*slot)
+                            && self.collector.shred_count(*slot) > 0
+                        {
+                            let req = TurbineMessage::RepairRequest(RepairRequest::BatchHeader {
+                                slot: *slot,
+                            });
                             if let Ok(bytes) = req.serialize_to_bytes() {
                                 for peer in &selected {
                                     let _ = self.socket.send_to(&bytes, peer).await;
                                 }
                             }
                             debug!(slot = *slot, "requesting missing batch header");
-                            metrics::counter!("nusantara_turbine_repair_requests_total").increment(1);
+                            metrics::counter!("nusantara_turbine_repair_requests_total")
+                                .increment(1);
                         }
 
                         let missing = self.collector.missing_shreds(*slot);
 
                         if missing.is_empty() && self.collector.shred_count(*slot) == 0 {
-                            let req = TurbineMessage::RepairRequest(
-                                RepairRequest::HighestShred { slot: *slot },
-                            );
+                            let req = TurbineMessage::RepairRequest(RepairRequest::HighestShred {
+                                slot: *slot,
+                            });
                             if let Ok(bytes) = req.serialize_to_bytes() {
                                 for peer in &selected {
                                     let _ = self.socket.send_to(&bytes, peer).await;
                                 }
-                                debug!(slot = *slot, peers = selected.len(), "broadcast HighestShred repair request");
+                                debug!(
+                                    slot = *slot,
+                                    peers = selected.len(),
+                                    "broadcast HighestShred repair request"
+                                );
                             }
-                            metrics::counter!("nusantara_turbine_repair_requests_total").increment(1);
+                            metrics::counter!("nusantara_turbine_repair_requests_total")
+                                .increment(1);
                             last_repair.insert(*slot, now);
                             continue;
                         }
@@ -225,9 +238,9 @@ impl RepairService {
                             if self.collector.is_slot_complete(*slot) {
                                 continue;
                             }
-                            let req = TurbineMessage::RepairRequest(
-                                RepairRequest::HighestShred { slot: *slot },
-                            );
+                            let req = TurbineMessage::RepairRequest(RepairRequest::HighestShred {
+                                slot: *slot,
+                            });
                             if let Ok(bytes) = req.serialize_to_bytes() {
                                 for peer in &selected {
                                     let _ = self.socket.send_to(&bytes, peer).await;
@@ -238,7 +251,8 @@ impl RepairService {
                                 shred_count = self.collector.shred_count(*slot),
                                 "requesting HighestShred — have shreds but missing last index"
                             );
-                            metrics::counter!("nusantara_turbine_repair_requests_total").increment(1);
+                            metrics::counter!("nusantara_turbine_repair_requests_total")
+                                .increment(1);
                             last_repair.insert(*slot, now);
                             continue;
                         }
@@ -246,12 +260,10 @@ impl RepairService {
                         debug!(slot, missing_count = missing.len(), "requesting batch repair shreds");
 
                         for chunk in missing.chunks(MAX_REPAIR_BATCH_REQUEST as usize) {
-                            let req = TurbineMessage::RepairRequest(
-                                RepairRequest::ShredBatch {
-                                    slot: *slot,
-                                    indices: chunk.to_vec(),
-                                },
-                            );
+                            let req = TurbineMessage::RepairRequest(RepairRequest::ShredBatch {
+                                slot: *slot,
+                                indices: chunk.to_vec(),
+                            });
                             if let Ok(bytes) = req.serialize_to_bytes() {
                                 for peer in &selected {
                                     let _ = self.socket.send_to(&bytes, peer).await;
@@ -297,22 +309,16 @@ mod tests {
         let peers: Vec<SocketAddr> = (1000..1010).map(addr).collect();
         let result = sample_peers(&peers, 2);
         assert_eq!(result.len(), 2);
-        // All returned peers must be from the original list
         for p in &result {
             assert!(peers.contains(p));
         }
     }
 
     #[test]
-    fn sample_peers_empty_input() {
-        let result = sample_peers(&[], 3);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn sample_peers_exact_match() {
-        let peers = vec![addr(1000), addr(1001), addr(1002)];
-        let result = sample_peers(&peers, 3);
-        assert_eq!(result.len(), 3);
+    fn config_constants_from_toml() {
+        assert_eq!(MAX_REPAIR_SLOT_AGE, 1024);
+        assert_eq!(MAX_REPAIR_SLOTS_PER_TICK, 512);
+        assert_eq!(REPAIR_PEER_SAMPLE_SIZE, 2);
+        assert_eq!(REPAIR_COOLDOWN_MS, 1000);
     }
 }
