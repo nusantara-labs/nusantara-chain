@@ -2135,6 +2135,7 @@ dependencies = [
  "nusantara-system-program",
  "parking_lot 0.12.5",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

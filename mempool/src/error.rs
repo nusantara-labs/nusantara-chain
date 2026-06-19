@@ -14,4 +14,7 @@ pub enum MempoolError {
 
     #[error("account {payer} exceeded per-sender limit ({limit} transactions)")]
     AccountLimitExceeded { payer: Hash, limit: usize },
+
+    #[error("malformed transaction: {reason}")]
+    Malformed { reason: &'static str },
 }

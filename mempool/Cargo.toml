@@ -16,3 +16,4 @@ metrics.workspace = true
 
 [dev-dependencies]
 nusantara-system-program.workspace = true
+tokio.workspace = true
