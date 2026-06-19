@@ -1,6 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::cf::CF_SLOT_META;
+use crate::decode;
 use crate::error::StorageError;
 use crate::keys::slot_key;
 use crate::storage::Storage;
@@ -29,11 +30,7 @@ impl Storage {
     pub fn get_slot_meta(&self, slot: u64) -> Result<Option<SlotMeta>, StorageError> {
         let key = slot_key(slot);
         match self.get_cf(CF_SLOT_META, &key)? {
-            Some(bytes) => {
-                let meta = SlotMeta::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(meta))
-            }
+            Some(bytes) => Ok(Some(decode::<SlotMeta>(&bytes)?)),
             None => Ok(None),
         }
     }

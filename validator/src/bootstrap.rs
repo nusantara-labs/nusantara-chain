@@ -56,7 +56,7 @@ impl ValidatorNode {
         // 2c. Attempt snapshot restore before genesis
         let snapshot_dir = Path::new(&cli.ledger_path).join("snapshots");
         if storage.get_cf(CF_DEFAULT, GENESIS_HASH_KEY)?.is_none()
-            && let Some(snapshot_path) =
+            && let Ok(Some(snapshot_path)) =
                 nusantara_storage::snapshot_archive::find_latest_snapshot_file(&snapshot_dir)
         {
             info!(

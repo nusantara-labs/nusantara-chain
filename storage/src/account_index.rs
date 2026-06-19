@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
-use borsh::BorshDeserialize;
 use nusantara_core::Account;
 use nusantara_crypto::Hash;
 use rocksdb::IteratorMode;
 
 use crate::cf::{CF_ACCOUNTS, CF_ACCOUNT_INDEX};
+use crate::decode;
 use crate::error::StorageError;
 use crate::keys::{account_key, slot_key};
 use crate::storage::Storage;
@@ -101,20 +101,71 @@ impl Storage {
         self.get_account_at_slot(address, slot)
     }
 
-    /// Get an account at a specific slot.
+    /// Get the latest version of an account at or before `slot` ("as of slot" semantics).
+    ///
+    /// Uses a reverse seek from `account_key(address, slot)` to find the most
+    /// recent write that is still within the requested slot bound. Returns `None`
+    /// when no write exists at or before `slot` for this address.
     pub fn get_account_at_slot(
         &self,
         address: &Hash,
         slot: u64,
     ) -> Result<Option<Account>, StorageError> {
-        let key = account_key(address, slot);
-        match self.get_cf(CF_ACCOUNTS, &key)? {
-            Some(bytes) => {
-                let account = Account::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(account))
-            }
+        self.find_latest_account_at_or_before(address, slot)
+            .map(|opt| opt.map(|(_, account)| account))
+    }
+
+    /// Find the latest `(slot, Account)` pair for `address` where the stored
+    /// slot is `<= max_slot`. Returns `None` if no write exists in that range.
+    ///
+    /// This is the canonical seek-for-prev helper used by all rewind and cleanup
+    /// paths. It performs a single reverse-direction RocksDB seek (O(log N)) so
+    /// it is safe to call even on accounts with thousands of history entries —
+    /// the 512-cap from `get_account_history` is no longer needed here.
+    fn find_latest_account_at_or_before(
+        &self,
+        address: &Hash,
+        max_slot: u64,
+    ) -> Result<Option<(u64, Account)>, StorageError> {
+        let cf = self
+            .db
+            .cf_handle(CF_ACCOUNTS)
+            .ok_or(StorageError::CfNotFound(CF_ACCOUNTS))?;
+
+        // Seek to the last key ≤ account_key(address, max_slot) within CF_ACCOUNTS.
+        // Because keys are address(64) ++ slot(8 BE), a reverse iterator started
+        // from this position will yield this address's writes in descending slot
+        // order before crossing into a different address prefix.
+        let seek_key = account_key(address, max_slot);
+        let prefix = address.as_bytes();
+
+        let mut iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&seek_key, rocksdb::Direction::Reverse));
+
+        match iter.next() {
             None => Ok(None),
+            Some(Err(e)) => Err(StorageError::RocksDb(e)),
+            Some(Ok((key, value))) => {
+                // Verify the key belongs to this address (first 64 bytes) and has the
+                // correct length.  Any other key means there is no write at or before
+                // max_slot for this address.
+                if key.len() != 72 || &key[..64] != prefix {
+                    return Ok(None);
+                }
+                let stored_slot = u64::from_be_bytes(
+                    key[64..72]
+                        .try_into()
+                        .map_err(|_| StorageError::Corruption("invalid slot in account key".into()))?,
+                );
+                // The reverse seek may land on a key that is still too large when
+                // max_slot falls between two existing writes.  Verify the invariant.
+                if stored_slot > max_slot {
+                    return Ok(None);
+                }
+                let account = decode::<Account>(&value)?;
+                Ok(Some((stored_slot, account)))
+            }
         }
     }
 
@@ -135,7 +186,9 @@ impl Storage {
         for item in iter {
             let (key, value) = item.map_err(StorageError::RocksDb)?;
             if key.len() != 64 || value.len() != 8 {
-                continue;
+                return Err(StorageError::Corruption(
+                    "account_index entry has unexpected key/value length".into(),
+                ));
             }
 
             let current_slot = u64::from_be_bytes(
@@ -151,12 +204,10 @@ impl Storage {
                         .map_err(|_| StorageError::Corruption("invalid address".into()))?,
                 );
 
-                let history = self.get_account_history(&address, 512)?;
-                let best = history.iter().find(|(slot, _)| *slot <= max_slot);
-
-                match best {
+                // Use unbounded reverse-seek instead of the capped get_account_history(512)
+                match self.find_latest_account_at_or_before(&address, max_slot)? {
                     Some((slot, _)) => {
-                        batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot.to_be_bytes().to_vec());
+                        batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot_key(slot).to_vec());
                     }
                     None => {
                         batch.delete(CF_ACCOUNT_INDEX, address.as_bytes().to_vec());
@@ -208,7 +259,9 @@ impl Storage {
         for item in iter {
             let (key, value) = item.map_err(StorageError::RocksDb)?;
             if key.len() != 64 || value.len() != 8 {
-                continue;
+                return Err(StorageError::Corruption(
+                    "account_index entry has unexpected key/value length".into(),
+                ));
             }
 
             let current_slot = u64::from_be_bytes(
@@ -227,14 +280,40 @@ impl Storage {
                     .map_err(|_| StorageError::Corruption("invalid address".into()))?,
             );
 
-            let history = self.get_account_history(&address, 512)?;
-            let best = history
-                .iter()
-                .find(|(slot, _)| *slot <= root_slot || ancestor_slots.contains(slot));
+            // Streaming reverse-seek across CF_ACCOUNTS for this address: stop at
+            // the first write that is within the ancestry set or predates the
+            // fork root. Avoids loading the full account history into memory.
+            let best = {
+                let cf_acc = self
+                    .db
+                    .cf_handle(CF_ACCOUNTS)
+                    .ok_or(StorageError::CfNotFound(CF_ACCOUNTS))?;
+                let seek_key = account_key(&address, u64::MAX);
+                let addr_prefix = address.as_bytes();
+                let iter = self
+                    .db
+                    .iterator_cf(cf_acc, IteratorMode::From(&seek_key, rocksdb::Direction::Reverse));
+                let mut found = None;
+                for entry in iter {
+                    let (key, value) = entry.map_err(StorageError::RocksDb)?;
+                    if key.len() != 72 || &key[..64] != addr_prefix {
+                        break;
+                    }
+                    let slot = u64::from_be_bytes(key[64..72].try_into().map_err(|_| {
+                        StorageError::Corruption("invalid slot in account key".into())
+                    })?);
+                    if slot <= root_slot || ancestor_slots.contains(&slot) {
+                        let account = decode::<Account>(&value)?;
+                        found = Some((slot, account));
+                        break;
+                    }
+                }
+                found
+            };
 
             match best {
                 Some((slot, _)) => {
-                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot.to_be_bytes().to_vec());
+                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot_key(slot).to_vec());
                 }
                 None => {
                     batch.delete(CF_ACCOUNT_INDEX, address.as_bytes().to_vec());
@@ -268,12 +347,10 @@ impl Storage {
         for address in addresses {
             batch.delete(CF_ACCOUNTS, account_key(address, slot).to_vec());
 
-            let history = self.get_account_history(address, 512)?;
-            let best = history.iter().find(|(s, _)| *s <= parent_slot);
-
-            match best {
+            // Use the unbounded reverse-seek instead of capped get_account_history(512)
+            match self.find_latest_account_at_or_before(address, parent_slot)? {
                 Some((s, _)) => {
-                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), s.to_be_bytes().to_vec());
+                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot_key(s).to_vec());
                 }
                 None => {
                     batch.delete(CF_ACCOUNT_INDEX, address.as_bytes().to_vec());
@@ -304,14 +381,38 @@ impl Storage {
         for address in addresses {
             batch.delete(CF_ACCOUNTS, account_key(address, slot).to_vec());
 
-            let history = self.get_account_history(address, 512)?;
-            let best = history
-                .iter()
-                .find(|(s, _)| ancestor_slots.contains(s));
+            // Streaming reverse-seek: stop at the first write whose slot is in
+            // the ancestry set. Avoids loading the full history into memory.
+            let best = {
+                let cf_acc = self
+                    .db
+                    .cf_handle(CF_ACCOUNTS)
+                    .ok_or(StorageError::CfNotFound(CF_ACCOUNTS))?;
+                let seek_key = account_key(address, u64::MAX);
+                let addr_prefix = address.as_bytes();
+                let iter = self
+                    .db
+                    .iterator_cf(cf_acc, IteratorMode::From(&seek_key, rocksdb::Direction::Reverse));
+                let mut found = None;
+                for entry in iter {
+                    let (key, _value) = entry.map_err(StorageError::RocksDb)?;
+                    if key.len() != 72 || &key[..64] != addr_prefix {
+                        break;
+                    }
+                    let s = u64::from_be_bytes(key[64..72].try_into().map_err(|_| {
+                        StorageError::Corruption("invalid slot in account key".into())
+                    })?);
+                    if ancestor_slots.contains(&s) {
+                        found = Some(s);
+                        break;
+                    }
+                }
+                found
+            };
 
             match best {
-                Some((s, _)) => {
-                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), s.to_be_bytes().to_vec());
+                Some(s) => {
+                    batch.put(CF_ACCOUNT_INDEX, address.as_bytes().to_vec(), slot_key(s).to_vec());
                 }
                 None => {
                     batch.delete(CF_ACCOUNT_INDEX, address.as_bytes().to_vec());
@@ -342,9 +443,11 @@ impl Storage {
         let iter = self.db.iterator_cf(cf_index, IteratorMode::Start);
 
         for item in iter {
-            let (key, _value) = item.map_err(StorageError::RocksDb)?;
-            if key.len() != 64 {
-                continue;
+            let (key, value) = item.map_err(StorageError::RocksDb)?;
+            if key.len() != 64 || value.len() != 8 {
+                return Err(StorageError::Corruption(
+                    "account_index entry has unexpected key/value length".into(),
+                ));
             }
 
             // Partition by first byte of address
@@ -359,7 +462,13 @@ impl Storage {
                     .map_err(|_| StorageError::Corruption("invalid address".into()))?,
             );
 
-            if let Some(account) = self.get_account(&address)? {
+            // Decode slot directly from the index value to avoid a redundant CF lookup.
+            let slot = u64::from_be_bytes(
+                value[..8]
+                    .try_into()
+                    .map_err(|_| StorageError::Corruption("invalid slot in account_index".into()))?,
+            );
+            if let Some(account) = self.get_account_at_slot(&address, slot)? {
                 results.push((address, account));
             }
         }
@@ -381,9 +490,11 @@ impl Storage {
         let iter = self.db.iterator_cf(cf_index, IteratorMode::Start);
 
         for item in iter {
-            let (key, _value) = item.map_err(StorageError::RocksDb)?;
-            if key.len() != 64 {
-                continue;
+            let (key, value) = item.map_err(StorageError::RocksDb)?;
+            if key.len() != 64 || value.len() != 8 {
+                return Err(StorageError::Corruption(
+                    "account_index entry has unexpected key/value length".into(),
+                ));
             }
 
             let address = Hash::new(
@@ -392,7 +503,13 @@ impl Storage {
                     .map_err(|_| StorageError::Corruption("invalid address".into()))?,
             );
 
-            if let Some(account) = self.get_account(&address)? {
+            // Decode slot directly from the index value to avoid a redundant CF lookup.
+            let slot = u64::from_be_bytes(
+                value[..8]
+                    .try_into()
+                    .map_err(|_| StorageError::Corruption("invalid slot in account_index".into()))?,
+            );
+            if let Some(account) = self.get_account_at_slot(&address, slot)? {
                 results.push((address, account));
             }
         }
@@ -431,8 +548,7 @@ impl Storage {
                     .try_into()
                     .map_err(|_| StorageError::Corruption("invalid slot bytes".into()))?,
             );
-            let account = Account::try_from_slice(&value)
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let account = decode::<Account>(&value)?;
             results.push((slot, account));
             if results.len() >= limit {
                 break;
@@ -478,6 +594,8 @@ mod tests {
 
     #[test]
     fn get_account_at_slot() {
+        // Verify "as of slot" semantics: get_account_at_slot returns the latest
+        // write at or before the requested slot, not just an exact-key lookup.
         let (storage, _dir) = temp_storage();
         let addr = hash(b"bob");
         let acc1 = test_account(100);
@@ -490,12 +608,41 @@ mod tests {
         let latest = storage.get_account(&addr).unwrap().unwrap();
         assert_eq!(latest.lamports, 200);
 
-        // Historical at slot 1
+        // Exact slot 1 lookup returns slot-1 value.
         let hist = storage.get_account_at_slot(&addr, 1).unwrap().unwrap();
         assert_eq!(hist.lamports, 100);
 
-        // Missing slot
-        assert_eq!(storage.get_account_at_slot(&addr, 3).unwrap(), None);
+        // Slot 3 has no write but slot 1 does: must return slot-1 value
+        // (the previous buggy implementation returned None here).
+        let as_of_3 = storage.get_account_at_slot(&addr, 3).unwrap().unwrap();
+        assert_eq!(as_of_3.lamports, 100, "as-of-slot query should return latest version <= requested slot");
+    }
+
+    #[test]
+    fn get_account_at_slot_semantics() {
+        // Write at slots 1 and 5; query at 0, 3, 5, and 6.
+        let (storage, _dir) = temp_storage();
+        let addr = hash(b"carol_slot");
+        let acc_slot1 = test_account(111);
+        let acc_slot5 = test_account(555);
+
+        storage.put_account(&addr, 1, &acc_slot1).unwrap();
+        storage.put_account(&addr, 5, &acc_slot5).unwrap();
+
+        // slot 0: no write exists at or before slot 0 → None
+        assert_eq!(storage.get_account_at_slot(&addr, 0).unwrap(), None);
+
+        // slot 3: latest write ≤ 3 is at slot 1 → 111 lamports
+        let v3 = storage.get_account_at_slot(&addr, 3).unwrap().unwrap();
+        assert_eq!(v3.lamports, 111);
+
+        // slot 5: exact write at slot 5 → 555 lamports
+        let v5 = storage.get_account_at_slot(&addr, 5).unwrap().unwrap();
+        assert_eq!(v5.lamports, 555);
+
+        // slot 6: no write at 6 but write at 5 → 555 lamports
+        let v6 = storage.get_account_at_slot(&addr, 6).unwrap().unwrap();
+        assert_eq!(v6.lamports, 555);
     }
 
     #[test]

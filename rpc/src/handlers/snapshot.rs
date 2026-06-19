@@ -38,9 +38,11 @@ pub struct SnapshotResponse {
 pub async fn get_latest_snapshot(State(state): State<Arc<RpcState>>) -> impl IntoResponse {
     match state.storage.get_latest_snapshot() {
         Ok(Some(manifest)) => {
-            // Attempt to locate the snapshot file on disk and compute its hash + size
+            // Attempt to locate the snapshot file on disk and compute its hash + size.
+            // find_latest_snapshot_file now returns Result so directory permission
+            // errors are visible rather than silently falling through to genesis.
             let (file_hash, file_size) = match find_latest_snapshot_file(&state.snapshot_dir) {
-                Some(path) => match std::fs::read(&path) {
+                Ok(Some(path)) => match std::fs::read(&path) {
                     Ok(bytes) => {
                         let hash = nusantara_crypto::hash(&bytes);
                         let size = bytes.len() as u64;
@@ -51,7 +53,11 @@ pub async fn get_latest_snapshot(State(state): State<Arc<RpcState>>) -> impl Int
                         (None, None)
                     }
                 },
-                None => (None, None),
+                Ok(None) => (None, None),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to scan snapshot directory");
+                    (None, None)
+                }
             };
 
             let resp = SnapshotResponse {

@@ -3,6 +3,7 @@ use nusantara_crypto::Hash;
 use rocksdb::IteratorMode;
 
 use crate::cf::CF_SNAPSHOTS;
+use crate::decode;
 use crate::error::StorageError;
 use crate::keys::slot_key;
 use crate::storage::Storage;
@@ -28,11 +29,7 @@ impl Storage {
     pub fn get_snapshot(&self, slot: u64) -> Result<Option<SnapshotManifest>, StorageError> {
         let key = slot_key(slot);
         match self.get_cf(CF_SNAPSHOTS, &key)? {
-            Some(bytes) => {
-                let manifest = SnapshotManifest::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(manifest))
-            }
+            Some(bytes) => Ok(Some(decode::<SnapshotManifest>(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -46,11 +43,7 @@ impl Storage {
 
         let mut iter = self.db.iterator_cf(cf, IteratorMode::End);
         match iter.next() {
-            Some(Ok((_, value))) => {
-                let manifest = SnapshotManifest::try_from_slice(&value)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(manifest))
-            }
+            Some(Ok((_, value))) => Ok(Some(decode::<SnapshotManifest>(&value)?)),
             Some(Err(e)) => Err(StorageError::RocksDb(e)),
             None => Ok(None),
         }

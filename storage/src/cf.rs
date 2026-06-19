@@ -63,6 +63,10 @@ const BLOOM_FILTER_CFS: &[&str] = &[
     CF_SNAPSHOTS,
     CF_OWNER_INDEX,
     CF_PROGRAM_INDEX,
+    // CF_SLASHES uses prefix iteration by validator hash but also needs
+    // point-lookups via get_slash_proof(validator, slot); a bloom filter
+    // reduces unnecessary SST reads for validators with no recorded slashes.
+    CF_SLASHES,
 ];
 
 /// Create a shared block cache for all CFs.

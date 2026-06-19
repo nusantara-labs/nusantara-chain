@@ -1,6 +1,7 @@
 use nusantara_sysvar_program::Sysvar;
 
 use crate::cf::CF_SYSVARS;
+use crate::decode;
 use crate::error::StorageError;
 use crate::storage::Storage;
 
@@ -17,11 +18,7 @@ impl Storage {
     pub fn get_sysvar<S: Sysvar>(&self) -> Result<Option<S>, StorageError> {
         let id = S::id();
         match self.get_cf(CF_SYSVARS, id.as_bytes())? {
-            Some(bytes) => {
-                let sysvar = S::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(sysvar))
-            }
+            Some(bytes) => Ok(Some(decode::<S>(&bytes)?)),
             None => Ok(None),
         }
     }

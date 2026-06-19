@@ -3,6 +3,7 @@ use nusantara_crypto::Hash;
 use rocksdb::IteratorMode;
 
 use crate::cf::{CF_ADDRESS_SIGNATURES, CF_TRANSACTIONS};
+use crate::decode;
 use crate::error::StorageError;
 use crate::keys::address_sig_key;
 use crate::storage::Storage;
@@ -88,11 +89,7 @@ impl Storage {
         tx_hash: &Hash,
     ) -> Result<Option<TransactionStatusMeta>, StorageError> {
         match self.get_cf(CF_TRANSACTIONS, tx_hash.as_bytes())? {
-            Some(bytes) => {
-                let meta = TransactionStatusMeta::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(meta))
-            }
+            Some(bytes) => Ok(Some(decode::<TransactionStatusMeta>(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -145,10 +142,20 @@ impl Storage {
                     .try_into()
                     .map_err(|_| StorageError::Corruption("invalid tx_index bytes".into()))?,
             );
-            let tx_hash_bytes: [u8; 64] = value
-                .as_ref()
-                .try_into()
-                .map_err(|_| StorageError::Corruption("invalid tx hash in value".into()))?;
+            // A bad value length (not exactly 64 bytes) indicates an isolated
+            // corruption in the address_signatures CF. Warn and skip this row
+            // rather than aborting the entire paginated request — one corrupt
+            // row should not prevent the caller from seeing all other results.
+            let Ok(tx_hash_bytes): Result<[u8; 64], _> = value.as_ref().try_into() else {
+                tracing::warn!(
+                    address = %address,
+                    slot,
+                    tx_index,
+                    value_len = value.len(),
+                    "skipping address_signatures row with invalid tx hash length"
+                );
+                continue;
+            };
             let tx_hash = Hash::new(tx_hash_bytes);
             results.push((slot, tx_index, tx_hash));
             if results.len() >= limit {

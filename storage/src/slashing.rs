@@ -2,7 +2,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use nusantara_crypto::Hash;
 
 use crate::cf::CF_SLASHES;
+use crate::decode;
 use crate::error::StorageError;
+use crate::keys::slash_proof_key;
 use crate::storage::Storage;
 
 /// Proof of equivocation (double-voting) by a validator at a given slot.
@@ -26,13 +28,6 @@ pub struct SlashProof {
     pub timestamp: i64,
 }
 
-/// Build the RocksDB key for a slash proof: validator_hash(64) ++ slot(8 BE).
-fn slash_proof_key(validator: &Hash, slot: u64) -> [u8; 72] {
-    let mut key = [0u8; 72];
-    key[..64].copy_from_slice(validator.as_bytes());
-    key[64..].copy_from_slice(&slot.to_be_bytes());
-    key
-}
 
 impl Storage {
     /// Persist a slash proof for a validator.
@@ -57,8 +52,7 @@ impl Storage {
             if key.len() < 64 || key[..64] != *prefix {
                 break;
             }
-            let proof = SlashProof::try_from_slice(&value)
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let proof = decode::<SlashProof>(&value)?;
             results.push(proof);
         }
         Ok(results)
@@ -72,11 +66,7 @@ impl Storage {
     ) -> Result<Option<SlashProof>, StorageError> {
         let key = slash_proof_key(validator, slot);
         match self.get_cf(CF_SLASHES, &key)? {
-            Some(bytes) => {
-                let proof = SlashProof::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+            Some(bytes) => Ok(Some(decode::<SlashProof>(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -197,7 +187,7 @@ mod tests {
             timestamp: 1_234_567_890,
         };
         let bytes = borsh::to_vec(&proof).unwrap();
-        let decoded = SlashProof::try_from_slice(&bytes).unwrap();
+        let decoded: SlashProof = borsh::from_slice(&bytes).unwrap();
         assert_eq!(proof, decoded);
     }
 }

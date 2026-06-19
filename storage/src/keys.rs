@@ -2,6 +2,17 @@ use nusantara_crypto::Hash;
 
 const HASH_BYTES: usize = 64;
 
+/// Prefix used for full-block keys stored in CF_DEFAULT: `"block_"`.
+pub const FULL_BLOCK_PREFIX: &[u8] = b"block_";
+
+/// Build the full-block key in CF_DEFAULT: `"block_" ++ slot(8 BE)`.
+pub fn full_block_key(slot: u64) -> [u8; 14] {
+    let mut key = [0u8; 14];
+    key[..6].copy_from_slice(FULL_BLOCK_PREFIX);
+    key[6..].copy_from_slice(&slot_key(slot));
+    key
+}
+
 /// Encode a slot as 8-byte big-endian key.
 pub fn slot_key(slot: u64) -> [u8; 8] {
     slot.to_be_bytes()
@@ -29,6 +40,14 @@ pub fn shred_key(slot: u64, index: u32) -> [u8; 12] {
     let mut key = [0u8; 12];
     key[..8].copy_from_slice(&slot.to_be_bytes());
     key[8..].copy_from_slice(&index.to_be_bytes());
+    key
+}
+
+/// Encode a slash proof key: validator_hash(64) ++ slot(8 BE).
+pub fn slash_proof_key(validator: &Hash, slot: u64) -> [u8; 72] {
+    let mut key = [0u8; HASH_BYTES + 8];
+    key[..HASH_BYTES].copy_from_slice(validator.as_bytes());
+    key[HASH_BYTES..].copy_from_slice(&slot_key(slot));
     key
 }
 

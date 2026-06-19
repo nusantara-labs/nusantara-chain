@@ -19,12 +19,16 @@ impl Storage {
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
 
-        // Global RocksDB tuning
+        // Global RocksDB tuning.
+        // Use try_from to avoid silent truncation if parallelism or the
+        // configured background job count exceeds i32::MAX on exotic platforms.
         let parallelism = std::thread::available_parallelism()
-            .map(|p| p.get() as i32)
+            .map(|p| i32::try_from(p.get()).unwrap_or(i32::MAX))
             .unwrap_or(4);
         db_opts.increase_parallelism(parallelism);
-        db_opts.set_max_background_jobs(cf::MAX_BACKGROUND_JOBS as i32);
+        db_opts.set_max_background_jobs(
+            i32::try_from(cf::MAX_BACKGROUND_JOBS).unwrap_or(i32::MAX),
+        );
         db_opts.set_bytes_per_sync(1_048_576);
 
         let cf_descs = cf::cf_descriptors();
@@ -86,11 +90,12 @@ impl Storage {
     /// Flush memtables and WAL to persistent SST files on disk.
     ///
     /// Flushes all column families, not just the default one.
+    /// Returns `Err(CfNotFound)` if any registered CF is missing from the
+    /// open DB rather than silently skipping it.
     pub fn flush_all(&self) -> Result<(), StorageError> {
         for cf_name in cf::ALL_CF_NAMES {
-            if let Some(handle) = self.db.cf_handle(cf_name) {
-                self.db.flush_cf(&handle).map_err(StorageError::RocksDb)?;
-            }
+            let handle = self.cf_handle(cf_name)?;
+            self.db.flush_cf(&handle).map_err(StorageError::RocksDb)?;
         }
         self.db.flush_wal(true).map_err(StorageError::RocksDb)?;
         Ok(())

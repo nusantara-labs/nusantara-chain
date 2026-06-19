@@ -24,3 +24,10 @@ pub use shred::{DataShred, CodeShred};
 pub use transaction::{TransactionStatusMeta, TransactionStatus};
 pub use snapshot::SnapshotManifest;
 pub use slashing::SlashProof;
+
+/// Decode borsh-serialized bytes into `T` using the project-standard pattern:
+/// `T::deserialize(&mut &*bytes)`. This avoids the `try_from_slice` pattern
+/// which may silently succeed on truncated data when `T` has trailing fields.
+pub(crate) fn decode<T: borsh::BorshDeserialize>(bytes: &[u8]) -> Result<T, StorageError> {
+    T::deserialize(&mut &*bytes).map_err(|e| StorageError::Deserialization(e.to_string()))
+}

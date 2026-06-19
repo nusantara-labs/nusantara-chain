@@ -1,13 +1,67 @@
+use nusantara_core::Block;
 use nusantara_crypto::Hash;
 use rocksdb::IteratorMode;
 
-use crate::cf::{CF_BANK_HASHES, CF_ROOTS, CF_SLOT_HASHES};
+use crate::cf::{CF_BANK_HASHES, CF_BLOCKS, CF_DEFAULT, CF_ROOTS, CF_SLOT_HASHES, CF_SLOT_META};
 use crate::error::StorageError;
-use crate::keys::slot_key;
+use crate::keys::{full_block_key, slot_key};
+use crate::slot_meta::SlotMeta;
 use crate::storage::Storage;
+use crate::write_batch::StorageWriteBatch;
 
 impl Storage {
+    /// Atomically finalize a slot by staging all multi-CF writes in a single
+    /// `StorageWriteBatch` and committing once.
+    ///
+    /// A crash between individual `set_root` / `put_bank_hash` / `put_slot_hash`
+    /// / `put_slot_meta` / `put_block` calls would leave the storage in a
+    /// partially-finalized state. This method eliminates that window.
+    ///
+    /// Individual setters (`set_root`, `put_bank_hash`, etc.) are kept for call
+    /// sites that legitimately finalize a single aspect (e.g. replay test stubs).
+    /// For full slot finalization, prefer this method.
+    #[tracing::instrument(skip(self, block, bank_hash, slot_meta), fields(slot = block.header.slot), level = "info")]
+    pub fn finalize_slot(
+        &self,
+        block: &Block,
+        bank_hash: &Hash,
+        slot_meta: &SlotMeta,
+    ) -> Result<(), StorageError> {
+        let slot = block.header.slot;
+        let mut batch = StorageWriteBatch::new();
+
+        // CF_BLOCKS: header for fast header-only queries
+        let header_value = borsh::to_vec(&block.header)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(CF_BLOCKS, slot_key(slot).to_vec(), header_value);
+
+        // CF_DEFAULT: full block (header + transactions)
+        let block_key = full_block_key(slot);
+        let block_value = borsh::to_vec(block)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(CF_DEFAULT, block_key.to_vec(), block_value);
+
+        // CF_BANK_HASHES: bank hash for this slot
+        batch.put(CF_BANK_HASHES, slot_key(slot).to_vec(), bank_hash.as_bytes().to_vec());
+
+        // CF_SLOT_HASHES: block hash (same as bank hash in single-node mode)
+        batch.put(CF_SLOT_HASHES, slot_key(slot).to_vec(), block.header.block_hash.as_bytes().to_vec());
+
+        // CF_SLOT_META: shred metadata for this slot
+        let meta_value = borsh::to_vec(slot_meta)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        batch.put(CF_SLOT_META, slot_key(slot).to_vec(), meta_value);
+
+        // CF_ROOTS: mark as finalized root (empty value)
+        batch.put(CF_ROOTS, slot_key(slot).to_vec(), Vec::new());
+
+        self.write(&batch)
+    }
+
     /// Mark a slot as a finalized root.
+    ///
+    /// For full slot finalization, prefer `finalize_slot()` which stages all
+    /// related writes atomically in a single `StorageWriteBatch`.
     pub fn set_root(&self, slot: u64) -> Result<(), StorageError> {
         let key = slot_key(slot);
         self.put_cf(CF_ROOTS, &key, &[])
@@ -29,6 +83,9 @@ impl Storage {
         let mut iter = self.db.iterator_cf(cf, IteratorMode::End);
         match iter.next() {
             Some(Ok((key, _))) => {
+                if key.len() != 8 {
+                    return Ok(None);
+                }
                 let slot = u64::from_be_bytes(
                     key.as_ref()
                         .try_into()
@@ -42,6 +99,9 @@ impl Storage {
     }
 
     /// Store the bank hash for a slot.
+    ///
+    /// For full slot finalization, prefer `finalize_slot()` which stages all
+    /// related writes atomically in a single `StorageWriteBatch`.
     pub fn put_bank_hash(&self, slot: u64, hash: &Hash) -> Result<(), StorageError> {
         let key = slot_key(slot);
         self.put_cf(CF_BANK_HASHES, &key, hash.as_bytes())
@@ -62,6 +122,9 @@ impl Storage {
     }
 
     /// Store the slot-to-block-hash mapping.
+    ///
+    /// For full slot finalization, prefer `finalize_slot()` which stages all
+    /// related writes atomically in a single `StorageWriteBatch`.
     pub fn put_slot_hash(&self, slot: u64, hash: &Hash) -> Result<(), StorageError> {
         let key = slot_key(slot);
         self.put_cf(CF_SLOT_HASHES, &key, hash.as_bytes())
@@ -106,6 +169,9 @@ impl Storage {
                 break;
             }
             let (key, value) = item.map_err(StorageError::RocksDb)?;
+            if key.len() != 8 {
+                continue;
+            }
             let slot = u64::from_be_bytes(
                 key.as_ref()
                     .try_into()
@@ -124,12 +190,72 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nusantara_crypto::hash;
+    use nusantara_core::BlockHeader;
+    use nusantara_crypto::{Hash, hash};
 
     fn temp_storage() -> (Storage, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();
         (storage, dir)
+    }
+
+    fn test_block(slot: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                slot,
+                parent_slot: slot.saturating_sub(1),
+                parent_hash: hash(b"parent"),
+                block_hash: hash(format!("block_{slot}").as_bytes()),
+                timestamp: 1000 + slot as i64,
+                validator: hash(b"validator"),
+                transaction_count: 0,
+                merkle_root: hash(b"merkle"),
+                poh_hash: Hash::zero(),
+                bank_hash: Hash::zero(),
+                state_root: Hash::zero(),
+            },
+            transactions: Vec::new(),
+            batches: Vec::new(),
+        }
+    }
+
+    fn test_slot_meta(slot: u64) -> SlotMeta {
+        crate::slot_meta::SlotMeta {
+            slot,
+            parent_slot: slot.saturating_sub(1),
+            block_time: Some(1000 + slot as i64),
+            num_data_shreds: 1,
+            num_code_shreds: 0,
+            is_connected: true,
+            completed: true,
+        }
+    }
+
+    #[test]
+    fn finalize_slot_atomic() {
+        let (storage, _dir) = temp_storage();
+        let slot = 42u64;
+        let block = test_block(slot);
+        let bank_hash = hash(b"bank_42");
+        let slot_meta = test_slot_meta(slot);
+
+        storage.finalize_slot(&block, &bank_hash, &slot_meta).unwrap();
+
+        // All CFs must be populated after a single finalize_slot call
+        assert!(storage.is_root(slot).unwrap(), "slot must be marked as root");
+        assert_eq!(storage.get_bank_hash(slot).unwrap(), Some(bank_hash));
+        assert_eq!(
+            storage.get_slot_hash(slot).unwrap(),
+            Some(block.header.block_hash)
+        );
+        let loaded_meta = storage.get_slot_meta(slot).unwrap().unwrap();
+        assert_eq!(loaded_meta.slot, slot);
+        // Block header should be queryable
+        let loaded_header = storage.get_block_header(slot).unwrap().unwrap();
+        assert_eq!(loaded_header.slot, slot);
+        // Full block should be queryable
+        let loaded_block = storage.get_block(slot).unwrap().unwrap();
+        assert_eq!(loaded_block.header.slot, slot);
     }
 
     #[test]

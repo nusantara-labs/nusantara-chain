@@ -26,11 +26,19 @@ use crate::server::RpcState;
 #[tracing::instrument(skip(state))]
 pub async fn download_snapshot(State(state): State<Arc<RpcState>>) -> impl IntoResponse {
     let snapshot_path = match find_latest_snapshot_file(&state.snapshot_dir) {
-        Some(path) => path,
-        None => {
+        Ok(Some(path)) => path,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 axum::Json(serde_json::json!({"error": "no snapshot file available"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to scan snapshot directory");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": format!("snapshot directory error: {e}")})),
             )
                 .into_response();
         }

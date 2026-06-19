@@ -7,6 +7,7 @@ use nusantara_crypto::Hash;
 use rocksdb::IteratorMode;
 
 use crate::cf::{CF_ACCOUNT_INDEX, CF_BANK_HASHES, CF_DEFAULT, CF_ROOTS, CF_SNAPSHOTS};
+use crate::decode;
 use crate::error::StorageError;
 use crate::keys::slot_key;
 use crate::snapshot::SnapshotManifest;
@@ -116,8 +117,7 @@ pub fn load_from_file(path: &Path) -> Result<SnapshotArchive, StorageError> {
     reader
         .read_to_end(&mut bytes)
         .map_err(|e| StorageError::Io(e.to_string()))?;
-    let archive = SnapshotArchive::try_from_slice(&bytes)
-        .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+    let archive = decode::<SnapshotArchive>(&bytes)?;
     Ok(archive)
 }
 
@@ -220,11 +220,21 @@ pub fn cleanup_partial_snapshot_restore(storage: &Storage) -> Result<bool, Stora
 ///
 /// Scans for files matching the pattern `snapshot-{slot}.bin` and returns
 /// the path to the one with the highest slot number.
-pub fn find_latest_snapshot_file(dir: &Path) -> Option<std::path::PathBuf> {
-    let read_dir = std::fs::read_dir(dir).ok()?;
+///
+/// Returns `Err(StorageError::Io)` if `dir` cannot be read (e.g. permission
+/// denied), rather than silently returning `None` which would cause the
+/// validator to boot from genesis unexpectedly.
+pub fn find_latest_snapshot_file(
+    dir: &Path,
+) -> Result<Option<std::path::PathBuf>, StorageError> {
+    let read_dir =
+        std::fs::read_dir(dir).map_err(|e| StorageError::Io(e.to_string()))?;
     let mut best: Option<(u64, std::path::PathBuf)> = None;
 
-    for entry in read_dir.flatten() {
+    for entry in read_dir {
+        // IO errors on individual entries are propagated; parse errors (bad
+        // file name format) are silently skipped.
+        let entry = entry.map_err(|e| StorageError::Io(e.to_string()))?;
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && let Some(slot_str) = name
@@ -244,5 +254,5 @@ pub fn find_latest_snapshot_file(dir: &Path) -> Option<std::path::PathBuf> {
         }
     }
 
-    best.map(|(_, path)| path)
+    Ok(best.map(|(_, path)| path))
 }

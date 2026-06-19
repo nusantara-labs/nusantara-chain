@@ -2,8 +2,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use rocksdb::IteratorMode;
 
 use crate::cf::{CF_CODE_SHREDS, CF_DATA_SHREDS};
+use crate::decode;
 use crate::error::StorageError;
-use crate::keys::shred_key;
+use crate::keys::{shred_key, slot_key};
 use crate::storage::Storage;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -42,11 +43,7 @@ impl Storage {
     ) -> Result<Option<DataShred>, StorageError> {
         let key = shred_key(slot, index);
         match self.get_cf(CF_DATA_SHREDS, &key)? {
-            Some(bytes) => {
-                let shred = DataShred::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(shred))
-            }
+            Some(bytes) => Ok(Some(decode::<DataShred>(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -67,11 +64,7 @@ impl Storage {
     ) -> Result<Option<CodeShred>, StorageError> {
         let key = shred_key(slot, index);
         match self.get_cf(CF_CODE_SHREDS, &key)? {
-            Some(bytes) => {
-                let shred = CodeShred::try_from_slice(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(shred))
-            }
+            Some(bytes) => Ok(Some(decode::<CodeShred>(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -83,7 +76,7 @@ impl Storage {
             .cf_handle(CF_DATA_SHREDS)
             .ok_or(StorageError::CfNotFound(CF_DATA_SHREDS))?;
 
-        let prefix = slot.to_be_bytes();
+        let prefix = slot_key(slot);
         let iter = self.db.iterator_cf(
             cf,
             IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -95,8 +88,7 @@ impl Storage {
             if key.len() < 8 || key[..8] != prefix {
                 break;
             }
-            let shred = DataShred::try_from_slice(&value)
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let shred = decode::<DataShred>(&value)?;
             shreds.push(shred);
         }
         Ok(shreds)
@@ -109,7 +101,7 @@ impl Storage {
             .cf_handle(CF_CODE_SHREDS)
             .ok_or(StorageError::CfNotFound(CF_CODE_SHREDS))?;
 
-        let prefix = slot.to_be_bytes();
+        let prefix = slot_key(slot);
         let iter = self.db.iterator_cf(
             cf,
             IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -121,8 +113,7 @@ impl Storage {
             if key.len() < 8 || key[..8] != prefix {
                 break;
             }
-            let shred = CodeShred::try_from_slice(&value)
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let shred = decode::<CodeShred>(&value)?;
             shreds.push(shred);
         }
         Ok(shreds)
