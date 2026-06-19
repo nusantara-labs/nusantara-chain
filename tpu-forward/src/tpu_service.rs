@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use nusantara_core::native_token::const_parse_u64;
 use nusantara_core::transaction::Transaction;
 use nusantara_crypto::Hash;
 use tokio::sync::{mpsc, watch};
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 
 use crate::connection_cache::ConnectionCache;
 use crate::error::TpuError;
@@ -13,17 +14,26 @@ use crate::quic_client::TpuQuicClient;
 use crate::quic_server::TpuQuicServer;
 use crate::rate_limiter::RateLimiter;
 
+/// Ingress channel capacity between QUIC server and forwarder.
+const INGRESS_CHANNEL_CAPACITY: usize =
+    const_parse_u64(env!("NUSA_TPU_INGRESS_CHANNEL_CAPACITY")) as usize;
+
+/// Janitor period for purging expired rate-limiter entries and closed connections.
+const JANITOR_INTERVAL_MS: u64 = const_parse_u64(env!("NUSA_TPU_JANITOR_INTERVAL_MS"));
+
 pub struct TpuService;
 
 impl TpuService {
     /// Create and run the TPU service.
     ///
-    /// - `server_endpoint`: Quinn endpoint for incoming connections
-    /// - `client_endpoint`: Quinn endpoint for outgoing connections
-    /// - `my_identity`: This node's identity hash
-    /// - `local_tx_sender`: Channel to send transactions to local BlockProducer
-    /// - `leader_lookup`: Function returning current leader identity + TPU address
-    /// - `shutdown`: Shutdown signal
+    /// Spawns four tasks:
+    /// 1. QUIC server (accept + validate + rate-limit incoming txs)
+    /// 2. Transaction forwarder (batch + route to leader / local)
+    /// 3. Rate-limiter janitor (purge expired IP windows)
+    /// 4. Connection-cache janitor (prune closed QUIC connections)
+    ///
+    /// All tasks respect the shutdown signal.  A panic in any task is detected
+    /// and propagated so the caller can tear down cleanly.
     #[instrument(skip_all, name = "tpu_service")]
     pub async fn run<F>(
         server_endpoint: quinn::Endpoint,
@@ -38,33 +48,78 @@ impl TpuService {
         let rate_limiter = Arc::new(RateLimiter::new());
         let connection_cache = Arc::new(ConnectionCache::new());
 
-        // Channel from QUIC server -> forwarder
-        let (ingress_tx, ingress_rx) = mpsc::channel::<Transaction>(10_000);
+        let (ingress_tx, ingress_rx) = mpsc::channel::<Transaction>(INGRESS_CHANNEL_CAPACITY);
 
-        // QUIC server for incoming transactions
         let server = TpuQuicServer::new(server_endpoint, Arc::clone(&rate_limiter));
-
-        // QUIC client for forwarding
-        let client = Arc::new(TpuQuicClient::new(client_endpoint, connection_cache));
-
-        // Forwarder
+        let client = Arc::new(TpuQuicClient::new(
+            client_endpoint,
+            Arc::clone(&connection_cache),
+        ));
         let forwarder = TransactionForwarder::new(my_identity, client);
 
         let shutdown_server = shutdown.clone();
         let shutdown_forwarder = shutdown.clone();
+        let shutdown_rl_janitor = shutdown.clone();
+        let shutdown_cc_janitor = shutdown.clone();
 
-        // Run server and forwarder concurrently
+        // Task 1 — QUIC server.
         let server_handle = tokio::spawn(async move {
             server.run(ingress_tx, shutdown_server).await;
         });
 
+        // Task 2 — transaction forwarder.
         let forwarder_handle = tokio::spawn(async move {
             forwarder
-                .run(ingress_rx, local_tx_sender, leader_lookup, shutdown_forwarder)
+                .run(
+                    ingress_rx,
+                    local_tx_sender,
+                    leader_lookup,
+                    shutdown_forwarder,
+                )
                 .await;
         });
 
-        let _ = tokio::join!(server_handle, forwarder_handle);
+        // Task 3 — rate-limiter janitor.
+        let rl = Arc::clone(&rate_limiter);
+        let rl_janitor_handle = tokio::spawn(async move {
+            let period = tokio::time::Duration::from_millis(JANITOR_INTERVAL_MS);
+            let mut ticker = tokio::time::interval(period);
+            let mut sd = shutdown_rl_janitor;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = ticker.tick() => { rl.purge_expired(); }
+                    _ = sd.changed() => break,
+                }
+            }
+        });
+
+        // Task 4 — connection-cache janitor.
+        let cc = Arc::clone(&connection_cache);
+        let cc_janitor_handle = tokio::spawn(async move {
+            let period = tokio::time::Duration::from_millis(JANITOR_INTERVAL_MS);
+            let mut ticker = tokio::time::interval(period);
+            let mut sd = shutdown_cc_janitor;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = ticker.tick() => { cc.prune_closed(); }
+                    _ = sd.changed() => break,
+                }
+            }
+        });
+
+        // Wait for all tasks; propagate panics so the service tears down cleanly.
+        let result = tokio::try_join!(
+            server_handle,
+            forwarder_handle,
+            rl_janitor_handle,
+            cc_janitor_handle,
+        );
+
+        if let Err(e) = result {
+            error!(error = %e, "TPU service task panicked");
+        }
 
         info!("TPU service stopped");
     }
@@ -77,14 +132,16 @@ impl TpuService {
         let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
 
-        let server_config =
-            quinn::ServerConfig::with_single_cert(vec![cert_der], key_der.into())
-                .map_err(|e| TpuError::Tls(e.to_string()))?;
+        let server_config = quinn::ServerConfig::with_single_cert(vec![cert_der], key_der.into())
+            .map_err(|e| TpuError::Tls(e.to_string()))?;
 
         Ok(server_config)
     }
 
-    /// Create a client TLS configuration that accepts any certificate.
+    /// Create a client TLS configuration that skips TLS cert verification.
+    ///
+    /// Dilithium3 identity verification is performed at the application layer
+    /// (via signed shreds and gossip CRDS entries), not at the TLS layer.
     pub fn create_client_config() -> Result<quinn::ClientConfig, TpuError> {
         let crypto = rustls::ClientConfig::builder()
             .dangerous()
@@ -100,7 +157,7 @@ impl TpuService {
     }
 }
 
-/// Skip TLS certificate verification (we do Dilithium3 identity verification at app layer).
+/// Skip TLS certificate verification — identity is verified at the app layer.
 #[derive(Debug)]
 struct SkipServerVerification;
 

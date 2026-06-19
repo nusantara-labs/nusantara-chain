@@ -1,135 +1,149 @@
 use nusantara_core::batch_transaction::SignedTransactionBatch;
-use nusantara_core::native_token::const_parse_u64;
 use nusantara_core::transaction::Transaction;
 
 use crate::error::TpuError;
+use crate::protocol::{MAX_BATCH_ENTRIES, MAX_TRANSACTION_SIZE};
 
-pub const MAX_TRANSACTION_SIZE: u64 = const_parse_u64(env!("NUSA_TPU_MAX_TRANSACTION_SIZE"));
+/// Absolute wire-size ceiling for any batch message (decompressed borsh bytes).
+/// Used both here and in protocol::deserialize_from_bytes for consistency.
+pub const MAX_BATCH_WIRE_SIZE: usize = MAX_TRANSACTION_SIZE as usize * MAX_BATCH_ENTRIES as usize;
 
-pub struct TxValidator;
-
-impl TxValidator {
-    /// Quick structural validation of a transaction.
-    /// `raw_size` is the byte size already read from the QUIC stream, avoiding
-    /// a redundant borsh re-serialization just to check size.
-    pub fn validate(tx: &Transaction, raw_size: usize) -> Result<(), TpuError> {
-        // Check that there's at least one signature
-        if tx.signatures.is_empty() {
-            return Err(TpuError::InvalidTransaction(
-                "transaction has no signatures".to_string(),
-            ));
-        }
-
-        // Check message has required fields
-        if tx.message.account_keys.is_empty() {
-            return Err(TpuError::InvalidTransaction(
-                "transaction has no account keys".to_string(),
-            ));
-        }
-
-        // Check signature count matches num_required_signatures
-        if tx.signatures.len() != tx.message.num_required_signatures as usize {
-            return Err(TpuError::InvalidTransaction(format!(
-                "signature count {} != num_required_signatures {}",
-                tx.signatures.len(),
-                tx.message.num_required_signatures
-            )));
-        }
-
-        // Check size using the raw bytes already read (no re-serialization needed)
-        if raw_size > MAX_TRANSACTION_SIZE as usize {
-            return Err(TpuError::TransactionTooLarge {
-                size: raw_size,
-                max_size: MAX_TRANSACTION_SIZE as usize,
-            });
-        }
-
-        // Check account_keys length >= num_required_signatures
-        if tx.message.account_keys.len() < tx.message.num_required_signatures as usize {
-            return Err(TpuError::InvalidTransaction(
-                "fewer account keys than required signatures".to_string(),
-            ));
-        }
-
-        // Check instruction program_id_index references valid account
-        for ix in &tx.message.instructions {
-            if ix.program_id_index as usize >= tx.message.account_keys.len() {
-                return Err(TpuError::InvalidTransaction(
-                    "instruction references invalid program_id_index".to_string(),
-                ));
-            }
-        }
-
-        // Check signer_pubkeys count matches signatures
-        if tx.signer_pubkeys.len() != tx.signatures.len() {
-            return Err(TpuError::InvalidTransaction(format!(
-                "signer_pubkeys count {} != signature count {}",
-                tx.signer_pubkeys.len(),
-                tx.signatures.len()
-            )));
-        }
-
-        // Verify signatures (Dilithium3 verification at ingress)
-        if let Err(e) = tx.verify_signatures() {
-            metrics::counter!("nusantara_tpu_signature_failures_total").increment(1);
-            return Err(TpuError::InvalidTransaction(format!(
-                "signature verification failed: {e}"
-            )));
-        }
-
-        Ok(())
+/// Quick structural + signature validation of a single transaction.
+///
+/// `tx_serialized_size` must be the borsh-serialized byte length of `tx`,
+/// not the compressed wire size — this prevents the compression bypass where
+/// a 65 KB compressed stream inflates beyond MAX_TRANSACTION_SIZE.
+pub fn validate(tx: &Transaction, tx_serialized_size: usize) -> Result<(), TpuError> {
+    // 1. Cheap structural checks first — reject before any crypto.
+    if tx.message.account_keys.is_empty() {
+        return Err(TpuError::InvalidTransaction(
+            "transaction has no account keys".to_string(),
+        ));
     }
 
-    /// Validate a signed transaction batch.
-    /// 1 Dilithium3 verify + N Merkle proof verifies + structural checks.
-    pub fn validate_batch(
-        batch: &SignedTransactionBatch,
-        raw_size: usize,
-    ) -> Result<(), TpuError> {
-        if batch.entries.is_empty() {
-            return Err(TpuError::InvalidBatch("empty batch".to_string()));
-        }
+    if tx.signatures.is_empty() {
+        return Err(TpuError::InvalidTransaction(
+            "transaction has no signatures".to_string(),
+        ));
+    }
 
-        if raw_size > MAX_TRANSACTION_SIZE as usize * batch.entries.len() {
-            return Err(TpuError::TransactionTooLarge {
-                size: raw_size,
-                max_size: MAX_TRANSACTION_SIZE as usize * batch.entries.len(),
-            });
-        }
+    if tx.signatures.len() != tx.message.num_required_signatures as usize {
+        return Err(TpuError::InvalidTransaction(format!(
+            "signature count {} != num_required_signatures {}",
+            tx.signatures.len(),
+            tx.message.num_required_signatures
+        )));
+    }
 
-        // Verify batch signature (1 Dilithium3 verify)
-        if !batch.verify_signature() {
-            metrics::counter!("nusantara_tpu_signature_failures_total").increment(1);
-            return Err(TpuError::InvalidBatch(
-                "batch signature verification failed".to_string(),
+    if tx.message.account_keys.len() < tx.message.num_required_signatures as usize {
+        return Err(TpuError::InvalidTransaction(
+            "fewer account keys than required signatures".to_string(),
+        ));
+    }
+
+    for ix in &tx.message.instructions {
+        if ix.program_id_index as usize >= tx.message.account_keys.len() {
+            return Err(TpuError::InvalidTransaction(
+                "instruction references invalid program_id_index".to_string(),
             ));
         }
+    }
 
-        // Verify all Merkle proofs
-        if !batch.verify_all() {
-            return Err(TpuError::InvalidBatch(
-                "batch merkle proof verification failed".to_string(),
-            ));
+    if tx.signer_pubkeys.len() != tx.signatures.len() {
+        return Err(TpuError::InvalidTransaction(format!(
+            "signer_pubkeys count {} != signature count {}",
+            tx.signer_pubkeys.len(),
+            tx.signatures.len()
+        )));
+    }
+
+    // 2. Size check uses the actual serialized tx bytes, not the compressed wire size.
+    if tx_serialized_size > MAX_TRANSACTION_SIZE as usize {
+        return Err(TpuError::TransactionTooLarge {
+            size: tx_serialized_size,
+            max_size: MAX_TRANSACTION_SIZE as usize,
+        });
+    }
+
+    // 3. Expensive crypto last — only reached after cheap checks pass.
+    if let Err(e) = tx.verify_signatures() {
+        metrics::counter!("nusantara_tpu_signature_failures_total").increment(1);
+        return Err(TpuError::InvalidTransaction(format!(
+            "signature verification failed: {e}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a signed transaction batch.
+///
+/// Validation order: cheap structural → absolute size cap → entry count cap →
+/// per-entry structural → 1 Dilithium3 verify → N Merkle proof verifies.
+///
+/// `decompressed_wire_size` is the byte length of the borsh-encoded batch
+/// (after decompression) — used as an absolute ceiling before per-entry work.
+pub fn validate_batch(
+    batch: &SignedTransactionBatch,
+    decompressed_wire_size: usize,
+) -> Result<(), TpuError> {
+    // 1. Empty check.
+    if batch.entries.is_empty() {
+        return Err(TpuError::InvalidBatch("empty batch".to_string()));
+    }
+
+    // 2. Absolute wire-size ceiling — attacker-controlled entries.len() cannot
+    //    inflate this bound because it is a fixed const, not `entries.len() * MAX_TX`.
+    if decompressed_wire_size > MAX_BATCH_WIRE_SIZE {
+        return Err(TpuError::TransactionTooLarge {
+            size: decompressed_wire_size,
+            max_size: MAX_BATCH_WIRE_SIZE,
+        });
+    }
+
+    // 3. Entry count cap — caps forced Merkle verify work.
+    if batch.entries.len() > MAX_BATCH_ENTRIES as usize {
+        return Err(TpuError::InvalidBatch(format!(
+            "batch has {} entries, max {}",
+            batch.entries.len(),
+            MAX_BATCH_ENTRIES
+        )));
+    }
+
+    // 4. Per-entry structural checks (no crypto yet).
+    for (i, entry) in batch.entries.iter().enumerate() {
+        if entry.message.account_keys.is_empty() {
+            return Err(TpuError::InvalidBatch(format!(
+                "batch entry {i}: no account keys"
+            )));
         }
-
-        // Structural validation on each message
-        for (i, entry) in batch.entries.iter().enumerate() {
-            if entry.message.account_keys.is_empty() {
+        for ix in &entry.message.instructions {
+            if ix.program_id_index as usize >= entry.message.account_keys.len() {
                 return Err(TpuError::InvalidBatch(format!(
-                    "batch entry {i}: no account keys"
+                    "batch entry {i}: invalid program_id_index"
                 )));
             }
-            for ix in &entry.message.instructions {
-                if ix.program_id_index as usize >= entry.message.account_keys.len() {
-                    return Err(TpuError::InvalidBatch(format!(
-                        "batch entry {i}: invalid program_id_index"
-                    )));
-                }
-            }
         }
-
-        Ok(())
     }
+
+    // 5. Expensive crypto — 1 Dilithium3 verify over the batch signature.
+    if !batch.verify_signature() {
+        metrics::counter!("nusantara_tpu_signature_failures_total").increment(1);
+        return Err(TpuError::InvalidBatch(
+            "batch signature verification failed".to_string(),
+        ));
+    }
+
+    // 6. N Merkle proof verifications (cheapest crypto, still after structural).
+    if !batch.verify_all() {
+        // Distinct counter from signature_failures — different failure mode.
+        metrics::counter!("nusantara_tpu_merkle_proof_failures_total").increment(1);
+        return Err(TpuError::InvalidBatch(
+            "batch merkle proof verification failed".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -161,21 +175,21 @@ mod tests {
         tx
     }
 
-    /// Helper: get the borsh-serialized size of a transaction for the raw_size param.
-    fn tx_raw_size(tx: &Transaction) -> usize {
+    fn tx_serialized_size(tx: &Transaction) -> usize {
         borsh::to_vec(tx).unwrap().len()
     }
 
     #[test]
     fn config_values() {
         assert_eq!(MAX_TRANSACTION_SIZE, 65536);
+        assert_eq!(MAX_BATCH_ENTRIES, 64);
     }
 
     #[test]
     fn valid_transaction_passes() {
         let tx = valid_tx();
-        let size = tx_raw_size(&tx);
-        assert!(TxValidator::validate(&tx, size).is_ok());
+        let size = tx_serialized_size(&tx);
+        assert!(validate(&tx, size).is_ok());
     }
 
     #[test]
@@ -189,7 +203,7 @@ mod tests {
             instructions: vec![],
         };
         let tx = Transaction::new(msg);
-        assert!(TxValidator::validate(&tx, 100).is_err());
+        assert!(validate(&tx, 100).is_err());
     }
 
     #[test]
@@ -203,12 +217,10 @@ mod tests {
             instructions: vec![],
         };
         let mut tx = Transaction::new(msg);
-        // Only add 1 signature when 2 required — keep signer_pubkeys in sync
-        // so the test specifically hits the sig count vs num_required_signatures check
         let kp = Keypair::generate();
         tx.signatures = vec![kp.sign(&[0u8])];
         tx.signer_pubkeys = vec![kp.public_key().clone()];
-        let err = TxValidator::validate(&tx, 100).unwrap_err().to_string();
+        let err = validate(&tx, 100).unwrap_err().to_string();
         assert!(
             err.contains("signature count") && err.contains("num_required_signatures"),
             "expected signature count mismatch error, got: {err}"
@@ -235,10 +247,8 @@ mod tests {
         };
         let mut tx = Transaction::new(msg);
         tx.sign(&[&kp]);
-
-        // Tamper: remove signer_pubkeys so count no longer matches signatures
         tx.signer_pubkeys.clear();
-        let err = TxValidator::validate(&tx, 100).unwrap_err().to_string();
+        let err = validate(&tx, 100).unwrap_err().to_string();
         assert!(
             err.contains("signer_pubkeys count"),
             "expected signer_pubkeys count mismatch error, got: {err}"
@@ -266,10 +276,8 @@ mod tests {
         };
         let mut tx = Transaction::new(msg);
         tx.sign(&[&kp]);
-
-        // Tamper: replace signer_pubkeys with wrong key so verify_signatures fails
         tx.signer_pubkeys = vec![kp2.public_key().clone()];
-        let err = TxValidator::validate(&tx, 100).unwrap_err().to_string();
+        let err = validate(&tx, 100).unwrap_err().to_string();
         assert!(
             err.contains("signature verification failed"),
             "expected signature verification error, got: {err}"
@@ -286,21 +294,39 @@ mod tests {
             account_keys: vec![kp.address()],
             recent_blockhash: hash(b"bh"),
             instructions: vec![CompiledInstruction {
-                program_id_index: 99, // out of bounds
+                program_id_index: 99,
                 accounts: vec![],
                 data: vec![],
             }],
         };
         let mut tx = Transaction::new(msg);
         tx.sign(&[&kp]);
-        assert!(TxValidator::validate(&tx, 100).is_err());
+        assert!(validate(&tx, 100).is_err());
     }
 
     #[test]
-    fn rejects_oversized_raw() {
+    fn rejects_oversized_tx() {
         let tx = valid_tx();
-        // Pass a raw_size exceeding the limit
-        let err = TxValidator::validate(&tx, MAX_TRANSACTION_SIZE as usize + 1).unwrap_err();
+        let err = validate(&tx, MAX_TRANSACTION_SIZE as usize + 1).unwrap_err();
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn rejects_oversized_batch_wire() {
+        // Build a minimal valid batch using the proper constructor.
+        let kp = Keypair::generate();
+        let msg = Message {
+            num_required_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            account_keys: vec![kp.address()],
+            recent_blockhash: hash(b"bh"),
+            instructions: vec![],
+        };
+        let batch =
+            SignedTransactionBatch::new(vec![msg], &kp).expect("failed to build test batch");
+        // Pass a wire size exceeding MAX_BATCH_WIRE_SIZE — the absolute ceiling rejects it.
+        let err = validate_batch(&batch, MAX_BATCH_WIRE_SIZE + 1).unwrap_err();
         assert!(err.to_string().contains("too large"));
     }
 }
