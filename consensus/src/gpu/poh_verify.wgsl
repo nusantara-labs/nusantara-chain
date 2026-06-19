@@ -49,13 +49,15 @@ const RHO_OFFSETS: array<u32, 25> = array<u32, 25>(
     18u, 2u, 61u, 56u, 14u,
 );
 
-// Pi step permutation indices
+// Pi step permutation indices.
+// PI_INDICES[i] = destination linear index for source linear index i,
+// where linear = x + 5*y. Per FIPS 202: dst(x,y) = (y, (2x + 3y) mod 5).
 const PI_INDICES: array<u32, 25> = array<u32, 25>(
-    0u, 6u, 12u, 18u, 24u,
-    3u, 9u, 10u, 16u, 22u,
-    1u, 7u, 13u, 19u, 20u,
-    4u, 5u, 11u, 17u, 23u,
-    2u, 8u, 14u, 15u, 21u,
+    0u, 10u, 20u, 5u, 15u,
+    16u, 1u, 11u, 21u, 6u,
+    7u, 17u, 2u, 12u, 22u,
+    23u, 8u, 18u, 3u, 13u,
+    14u, 24u, 9u, 19u, 4u,
 );
 
 // Rotate a u64 represented as (lo, hi) pair by n bits

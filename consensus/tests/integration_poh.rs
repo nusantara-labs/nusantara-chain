@@ -33,7 +33,6 @@ fn test_poh_with_transaction_mixins() {
 }
 
 #[test]
-#[ignore] // Only runs if GPU is available
 fn test_poh_gpu_matches_cpu() {
     let init = hash(b"genesis");
     let mut recorder = PohRecorder::new(init);
