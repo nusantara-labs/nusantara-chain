@@ -170,8 +170,18 @@ pub fn replay_block_full(
     // 13. Record slot hash in bank
     bank.record_slot_hash(slot, block.header.block_hash);
 
-    // 14. Feed through ReplayStage for fork tree / Tower / commitment processing
-    let result = replay_stage.replay_block(block, &[])?;
+    // 14. Feed through ReplayStage for fork tree / Tower / commitment processing.
+    //     parent_poh is the PoH tip of the parent block, used as the initial hash
+    //     for verifying poh_entries. Fetched from storage so the verification is
+    //     correct when poh_entries is non-empty (full PoH replay path).
+    //     Falls back to Hash::zero() for genesis (slot 0 has no parent block).
+    let parent_poh = storage
+        .get_block_header(parent_slot)
+        .ok()
+        .flatten()
+        .map(|h| h.poh_hash)
+        .unwrap_or_else(nusantara_crypto::Hash::zero);
+    let result = replay_stage.replay_block(block, &[], &parent_poh)?;
 
     Ok(result)
 }

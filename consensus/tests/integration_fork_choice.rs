@@ -23,10 +23,10 @@ fn test_fork_tree_heaviest_fork_with_stake() {
     // Fork C: 0 -> 6
     tree.add_slot(6, 0, h("b6"), h("bk6")).unwrap();
 
-    // Add stake-weighted votes
-    tree.add_vote(3, 100); // Fork A gets 100 stake
-    tree.add_vote(5, 150); // Fork B gets 150 stake
-    tree.add_vote(6, 50); // Fork C gets 50 stake
+    // Add stake-weighted votes (B1: each voter distinct)
+    tree.add_vote(3, hash(b"v1"), 100); // Fork A gets 100 stake
+    tree.add_vote(5, hash(b"v2"), 150); // Fork B gets 150 stake
+    tree.add_vote(6, hash(b"v3"), 50); // Fork C gets 50 stake
 
     // Fork B should be the heaviest
     let best = tree.compute_best_fork();
@@ -55,7 +55,7 @@ fn test_fork_tree_root_pruning() {
     assert_eq!(tree.node_count(), 7);
 
     // Set root to slot 2 - should prune slots 0, 1, 5, 6
-    let pruned = tree.set_root(2);
+    let pruned = tree.set_root(2).unwrap();
     assert!(pruned.contains(&0));
     assert!(pruned.contains(&1));
     assert!(pruned.contains(&5));
@@ -75,16 +75,16 @@ fn test_fork_tree_reorg() {
     // Fork B: 0 -> 2
     tree.add_slot(2, 0, h("b2"), h("bk2")).unwrap();
 
-    // Initially fork A is best
-    tree.add_vote(1, 100);
+    // Initially fork A is best (use distinct voters for B1 dedup)
+    tree.add_vote(1, hash(b"voter1"), 100);
     assert_eq!(tree.compute_best_fork(), 1);
 
     // Fork B overtakes with more stake
-    tree.add_vote(2, 200);
+    tree.add_vote(2, hash(b"voter2"), 200);
     assert_eq!(tree.compute_best_fork(), 2);
 
-    // Add even more to fork A
-    tree.add_vote(1, 250);
+    // Add even more to fork A (third distinct voter)
+    tree.add_vote(1, hash(b"voter3"), 250);
     assert_eq!(tree.compute_best_fork(), 1);
 }
 
@@ -103,16 +103,18 @@ fn test_fork_tree_with_commitment_tracker() {
     tracker.track_slot(2, h("b2"));
 
     // Vote with 50% stake - not enough for confirmation
-    tree.add_vote(1, 500);
-    tracker.record_vote(1, h("b1"), 500);
+    let voter1 = hash(b"voter1");
+    let voter2 = hash(b"voter2");
+    tree.add_vote(1, voter1, 500);
+    tracker.record_vote(1, h("b1"), voter1, 500);
     assert_eq!(
         tracker.get_commitment(1).unwrap(),
         CommitmentLevel::Processed
     );
 
-    // Add more votes reaching 66% threshold
-    tree.add_vote(1, 170);
-    let level = tracker.record_vote(1, h("b1"), 170);
+    // Add more votes reaching 66% threshold (different voter)
+    tree.add_vote(1, voter2, 170);
+    let level = tracker.record_vote(1, h("b1"), voter2, 170);
     assert_eq!(level, CommitmentLevel::Confirmed);
 
     // Finalize
@@ -190,12 +192,12 @@ fn test_fork_tree_multiple_forks_and_votes() {
         }
     }
 
-    // Vote for fork 3 with the most stake
-    tree.add_vote(303, 500);
-    tree.add_vote(103, 100);
-    tree.add_vote(203, 200);
-    tree.add_vote(403, 300);
-    tree.add_vote(503, 400);
+    // Vote for fork 3 with the most stake (distinct voters for B1 dedup)
+    tree.add_vote(303, hash(b"v1"), 500);
+    tree.add_vote(103, hash(b"v2"), 100);
+    tree.add_vote(203, hash(b"v3"), 200);
+    tree.add_vote(403, hash(b"v4"), 300);
+    tree.add_vote(503, hash(b"v5"), 400);
 
     let best = tree.compute_best_fork();
     assert_eq!(best, 303); // Fork 3 has the most stake

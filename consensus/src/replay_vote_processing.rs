@@ -4,78 +4,94 @@ use nusantara_vote_program::{Vote, VoteInstruction};
 use crate::replay_stage::ReplayStage;
 
 /// Maximum number of pending vote entries (slot-level) to buffer before
-/// evicting the oldest ones. Prevents unbounded memory growth if gossip
-/// delivers votes far ahead of the fork tree.
+/// evicting the oldest (lowest-slot) ones. Prevents unbounded memory growth
+/// if gossip delivers votes far ahead of the fork tree. BTreeMap keeps slots
+/// sorted so pop_first() evicts the oldest entry in O(log N) (B14).
 const MAX_PENDING_VOTE_SLOTS: usize = 10_000;
 
 impl ReplayStage {
     /// Process a gossip vote from a peer validator.
     ///
     /// If the voted slot is not yet in the fork tree the vote is buffered in
-    /// `pending_votes` so it can be replayed once the slot is added.
-    pub fn process_gossip_vote(&mut self, _voter: Hash, slot: u64, hash: Hash, stake: u64) {
+    /// `pending_votes` so it can be replayed once the slot is added (B31 comment).
+    pub fn process_gossip_vote(&mut self, voter: Hash, slot: u64, hash: Hash, stake: u64) {
         if self.fork_tree.contains(slot) {
-            self.fork_tree.add_vote(slot, stake);
-            self.commitment_tracker.record_vote(slot, hash, stake);
+            // B1: pass voter for dedup in fork_tree and commitment_tracker.
+            self.fork_tree.add_vote(slot, voter, stake);
+            self.commitment_tracker.record_vote(slot, hash, voter, stake);
         } else {
             // Buffer the vote for later replay once the slot enters the tree.
             let pending = self.pending_votes.entry(slot).or_default();
-            pending.push((hash, stake));
+            pending.push((voter, hash, stake));
 
-            // Evict oldest slots when the map exceeds capacity.
-            if self.pending_votes.len() > MAX_PENDING_VOTE_SLOTS {
-                let mut slots: Vec<u64> = self.pending_votes.keys().copied().collect();
-                slots.sort_unstable();
-                let to_remove = self.pending_votes.len() - MAX_PENDING_VOTE_SLOTS;
-                for &s in &slots[..to_remove] {
-                    self.pending_votes.remove(&s);
-                }
+            // B14: BTreeMap keeps slots sorted; pop_first evicts the oldest slot.
+            while self.pending_votes.len() > MAX_PENDING_VOTE_SLOTS {
+                self.pending_votes.pop_first();
             }
         }
     }
 
-    /// Drain any pending gossip votes for `slot` and apply them to the fork
-    /// tree and commitment tracker. Called after a slot is added to the tree.
+    /// Drain pending gossip votes for `slot` and apply them to the fork tree
+    /// and commitment tracker. Called after a slot is added to the tree.
+    ///
+    /// B31: only drains the exact slot — does not affect any other slot's pending votes.
     pub(crate) fn drain_pending_votes(&mut self, slot: u64) {
         if let Some(votes) = self.pending_votes.remove(&slot) {
-            for (hash, stake) in votes {
-                self.fork_tree.add_vote(slot, stake);
-                self.commitment_tracker.record_vote(slot, hash, stake);
+            for (voter, hash, stake) in votes {
+                // B1: pass voter for dedup.
+                self.fork_tree.add_vote(slot, voter, stake);
+                self.commitment_tracker.record_vote(slot, hash, voter, stake);
             }
         }
     }
 }
 
-/// Extract a Vote and the voter's identity from a transaction.
+/// Extract all Vote instructions and their voter identities from a transaction.
+///
+/// B11: returns a `Vec` instead of `Option` so transactions containing multiple
+/// vote instructions (e.g. batched votes) are all processed. Returns an empty
+/// Vec if no vote instructions are found.
 ///
 /// The voter identity is the **authorized_voter** — the second account in the
 /// vote instruction's account list (`ix.accounts[1]`), NOT the fee payer
 /// (`account_keys[0]`). The fee payer may differ from the authorized voter
 /// when a separate relayer pays for the transaction.
-pub(crate) fn extract_vote_from_transaction(
+pub(crate) fn extract_votes_from_transaction(
     tx: &nusantara_core::transaction::Transaction,
-) -> Option<(Hash, Vote)> {
+) -> Vec<(Hash, Vote)> {
     use nusantara_core::program::VOTE_PROGRAM_ID;
 
-    for ix in &tx.message.instructions {
-        let program_id = tx.message.account_keys.get(ix.program_id_index as usize)?;
-        if *program_id == *VOTE_PROGRAM_ID
-            && let Ok(vote_ix) = borsh::from_slice::<VoteInstruction>(&ix.data)
-        {
-            // The vote instruction layout (see vote-program/src/lib.rs):
-            //   accounts[0] = vote_account (writable)
-            //   accounts[1] = authorized_voter (signer, readonly)
-            let voter_index = *ix.accounts.get(1)? as usize;
-            let voter = *tx.message.account_keys.get(voter_index)?;
+    let mut votes = Vec::new();
 
-            match vote_ix {
-                VoteInstruction::Vote(vote) => return Some((voter, vote)),
-                VoteInstruction::SwitchVote(vote, _) => return Some((voter, vote)),
-                _ => {}
-            }
+    for ix in &tx.message.instructions {
+        let Some(program_id) = tx.message.account_keys.get(ix.program_id_index as usize) else {
+            continue;
+        };
+        if *program_id != *VOTE_PROGRAM_ID {
+            continue;
+        }
+        let Ok(vote_ix) = borsh::from_slice::<VoteInstruction>(&ix.data) else {
+            continue;
+        };
+
+        // The vote instruction layout (see vote-program/src/lib.rs):
+        //   accounts[0] = vote_account (writable)
+        //   accounts[1] = authorized_voter (signer, readonly)
+        let Some(&voter_idx) = ix.accounts.get(1) else {
+            continue;
+        };
+        let Some(&voter) = tx.message.account_keys.get(voter_idx as usize) else {
+            continue;
+        };
+
+        match vote_ix {
+            VoteInstruction::Vote(vote) => votes.push((voter, vote)),
+            VoteInstruction::SwitchVote(vote, _) => votes.push((voter, vote)),
+            _ => {}
         }
     }
-    None
+
+    votes
 }
 
 #[cfg(test)]
@@ -123,8 +139,10 @@ mod tests {
         let mut tx = Transaction::new(msg);
         tx.sign(&[&payer_kp, &voter_kp]);
 
-        let (extracted_voter, extracted_vote) =
-            extract_vote_from_transaction(&tx).expect("should extract vote");
+        // B11: extract_votes_from_transaction returns Vec
+        let extracted = extract_votes_from_transaction(&tx);
+        assert_eq!(extracted.len(), 1, "should extract one vote");
+        let (extracted_voter, extracted_vote) = extracted.into_iter().next().unwrap();
 
         // The voter must be the authorized_voter, not the fee payer
         assert_eq!(extracted_voter, voter);
@@ -137,12 +155,13 @@ mod tests {
     fn pending_votes_buffered_and_drained() {
         let (mut stage, _dir) = make_replay_stage();
         let block_hash = hash(b"block_5");
+        let voter = hash(b"voter");
 
         // Slot 5 is NOT in the fork tree yet
         assert!(!stage.fork_tree.contains(5));
 
-        // Process a gossip vote for slot 5 — should be buffered
-        stage.process_gossip_vote(hash(b"voter"), 5, block_hash, 100);
+        // Process a gossip vote for slot 5 — should be buffered (B1: voter passed)
+        stage.process_gossip_vote(voter, 5, block_hash, 100);
         assert!(stage.pending_votes.contains_key(&5));
         // Fork tree should NOT have any vote weight for slot 5
         assert!(stage.fork_tree.get_node(5).is_none());

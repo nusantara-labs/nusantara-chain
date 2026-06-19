@@ -18,7 +18,6 @@ pub struct TowerVoteResult {
     /// votes crossed MAX_LOCKOUT_HISTORY confirmations in a single round.
     pub new_root_slots: Vec<u64>,
     pub expired_lockouts: Vec<Lockout>,
-    pub updated_vote_state: VoteState,
 }
 
 pub struct Tower {
@@ -46,10 +45,11 @@ impl Tower {
     /// 4. If bottom vote reaches MAX_LOCKOUT_HISTORY confirmations -> becomes root
     #[instrument(skip(self, vote), level = "debug")]
     pub fn process_vote(&mut self, vote: &Vote) -> Result<TowerVoteResult, ConsensusError> {
-        let vote_slot = *vote.slots.last().ok_or(ConsensusError::VoteTooOld {
-            vote_slot: 0,
-            root_slot: self.vote_state.root_slot.unwrap_or(0),
-        })?;
+        // B10: return EmptyVoteSlots instead of a fake VoteTooOld with slot 0.
+        let vote_slot = *vote
+            .slots
+            .last()
+            .ok_or(ConsensusError::EmptyVoteSlots)?;
 
         // Check vote is not at or before root
         if let Some(root) = self.vote_state.root_slot
@@ -123,7 +123,6 @@ impl Tower {
         Ok(TowerVoteResult {
             new_root_slots,
             expired_lockouts: expired,
-            updated_vote_state: self.vote_state.clone(),
         })
     }
 
@@ -141,11 +140,13 @@ impl Tower {
     }
 
     /// Check switch threshold: is there enough stake on the alternative fork?
+    ///
+    /// B26: removed the unused `_switch_slot` parameter; `voted_stakes` renamed
+    /// to `alternative_fork_stakes` to clarify it represents the competing fork.
     /// Returns true if the alternative fork has >= SWITCH_THRESHOLD_PERCENTAGE of total stake.
     pub fn check_switch_threshold(
         &self,
-        _switch_slot: u64,
-        voted_stakes: &[(Hash, u64)],
+        alternative_fork_stakes: &[(Hash, u64)],
         total_stake: u64,
     ) -> bool {
         if total_stake == 0 {
@@ -153,7 +154,7 @@ impl Tower {
         }
 
         // Sum all stake on the alternative fork
-        let alternative_stake: u64 = voted_stakes.iter().map(|(_, s)| *s).sum();
+        let alternative_stake: u64 = alternative_fork_stakes.iter().map(|(_, s)| *s).sum();
         // Use u128 intermediate to prevent overflow when alternative_stake > u64::MAX / 100
         let pct = (alternative_stake as u128 * 100 / total_stake as u128) as u64;
         pct >= SWITCH_THRESHOLD_PERCENTAGE
@@ -262,11 +263,12 @@ mod tests {
     #[test]
     fn switch_threshold() {
         let tower = make_tower();
+        // B26: two-arg signature (no switch_slot).
         let stakes = vec![(hash(b"v1"), 40)];
-        assert!(tower.check_switch_threshold(10, &stakes, 100));
+        assert!(tower.check_switch_threshold(&stakes, 100));
 
         let stakes = vec![(hash(b"v1"), 30)];
-        assert!(!tower.check_switch_threshold(10, &stakes, 100));
+        assert!(!tower.check_switch_threshold(&stakes, 100));
     }
 
     #[test]
@@ -278,12 +280,12 @@ mod tests {
         let stakes = vec![(hash(b"v1"), large_stake)];
         // large_stake / total_stake = (MAX/50) / (MAX/10) = 10/50 = 20%
         // 20% < 38% threshold, should return false
-        assert!(!tower.check_switch_threshold(10, &stakes, total_stake));
+        assert!(!tower.check_switch_threshold(&stakes, total_stake));
 
         // Now with enough stake: 50% > 38%
         let half_stake = total_stake / 2;
         let stakes_half = vec![(hash(b"v1"), half_stake)];
-        assert!(tower.check_switch_threshold(10, &stakes_half, total_stake));
+        assert!(tower.check_switch_threshold(&stakes_half, total_stake));
     }
 
     #[test]

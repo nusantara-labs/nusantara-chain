@@ -17,7 +17,6 @@ max_unconfirmed_depth = 64
 duplicate_threshold_percentage = 52
 
 [commitment]
-optimistic_confirmation_threshold = 66
 supermajority_threshold = 66
 
 [rewards]
@@ -25,3 +24,6 @@ partition_count = 4_096
 initial_inflation_rate_bps = 800
 terminal_inflation_rate_bps = 150
 taper_rate_bps = 1_500
+
+[slashing]
+penalty_bps = 500

@@ -39,7 +39,8 @@ fn setup_pipeline() -> (ReplayStage, tempfile::TempDir) {
             deactivation_epoch: u64::MAX,
             warmup_cooldown_rate_bps: 2500,
         },
-    );
+    )
+    .unwrap();
 
     bank.recalculate_epoch_stakes(0);
 
@@ -85,7 +86,7 @@ fn test_full_consensus_pipeline() {
     // Produce and replay 10 blocks
     for slot in 1..=10 {
         let block = make_block(slot, slot - 1, validator);
-        let result = stage.replay_block(&block, &[]).unwrap();
+        let result = stage.replay_block(&block, &[], &Hash::zero()).unwrap();
         assert_eq!(result.slot, slot);
         assert_eq!(result.parent_slot, slot - 1);
     }
@@ -117,14 +118,14 @@ fn test_consensus_pipeline_with_forks() {
     // Build main chain: 0 -> 1 -> 2 -> 3
     for slot in 1..=3 {
         let block = make_block(slot, slot - 1, validator);
-        stage.replay_block(&block, &[]).unwrap();
+        stage.replay_block(&block, &[], &Hash::zero()).unwrap();
     }
 
     // Build fork: 0 -> 4 -> 5
     let fork_block_4 = make_block(4, 0, validator);
-    stage.replay_block(&fork_block_4, &[]).unwrap();
+    stage.replay_block(&fork_block_4, &[], &Hash::zero()).unwrap();
     let fork_block_5 = make_block(5, 4, validator);
-    stage.replay_block(&fork_block_5, &[]).unwrap();
+    stage.replay_block(&fork_block_5, &[], &Hash::zero()).unwrap();
 
     // Both forks should exist
     assert!(stage.fork_tree().contains(3));
@@ -133,13 +134,13 @@ fn test_consensus_pipeline_with_forks() {
 
     // Continue building main chain from slot 3
     stage
-        .replay_block(&make_block(6, 3, validator), &[])
+        .replay_block(&make_block(6, 3, validator), &[], &Hash::zero())
         .unwrap();
     stage
-        .replay_block(&make_block(7, 6, validator), &[])
+        .replay_block(&make_block(7, 6, validator), &[], &Hash::zero())
         .unwrap();
     stage
-        .replay_block(&make_block(8, 7, validator), &[])
+        .replay_block(&make_block(8, 7, validator), &[], &Hash::zero())
         .unwrap();
 
     assert!(stage.fork_tree().contains(8));
@@ -217,7 +218,7 @@ fn test_consensus_pipeline_storage_persistence() {
 
         for slot in 1..=5 {
             let block = make_block(slot, slot - 1, validator);
-            stage.replay_block(&block, &[]).unwrap();
+            stage.replay_block(&block, &[], &Hash::zero()).unwrap();
         }
     }
 

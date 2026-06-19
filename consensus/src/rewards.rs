@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use nusantara_core::native_token::const_parse_u64;
 use nusantara_crypto::{Hash, hash};
@@ -10,6 +13,22 @@ use nusantara_core::DEFAULT_SLOT_DURATION_MS;
 use crate::error::ConsensusError;
 
 pub const PARTITION_COUNT: u64 = const_parse_u64(env!("NUSA_REWARDS_PARTITION_COUNT"));
+
+/// Precomputed inflation rate table for epochs 0..100.
+/// Epoch 0 = INITIAL_INFLATION_RATE_BPS; each subsequent epoch tapers by TAPER_RATE_BPS/10_000;
+/// clamped below at TERMINAL_INFLATION_RATE_BPS. Epoch >= 100 always returns TERMINAL.
+static INFLATION_RATE_TABLE: LazyLock<[u64; 100]> = LazyLock::new(|| {
+    let mut t = [0u64; 100];
+    let mut rate = const_parse_u64(env!("NUSA_REWARDS_INITIAL_INFLATION_RATE_BPS"));
+    let terminal = const_parse_u64(env!("NUSA_REWARDS_TERMINAL_INFLATION_RATE_BPS"));
+    let taper = const_parse_u64(env!("NUSA_REWARDS_TAPER_RATE_BPS"));
+    for slot in t.iter_mut() {
+        *slot = rate;
+        let next = rate.saturating_sub(rate * taper / 10_000);
+        rate = next.max(terminal);
+    }
+    t
+});
 pub const INITIAL_INFLATION_RATE_BPS: u64 =
     const_parse_u64(env!("NUSA_REWARDS_INITIAL_INFLATION_RATE_BPS"));
 pub const TERMINAL_INFLATION_RATE_BPS: u64 =
@@ -32,7 +51,10 @@ pub struct EpochRewards {
     pub total_rewards_lamports: u64,
     pub total_points: u128,
     pub point_value_lamports: u64,
-    pub partitions: Vec<Vec<RewardEntry>>,
+    /// Rewards grouped by partition index. Only non-empty partitions are present,
+    /// unlike the previous Vec<Vec<RewardEntry>> which allocated PARTITION_COUNT
+    /// (4096) inner vecs regardless of how many had entries.
+    pub partitions: HashMap<u32, Vec<RewardEntry>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -48,19 +70,14 @@ pub struct RewardsCalculator;
 
 impl RewardsCalculator {
     /// Calculate the inflation rate for a given epoch in basis points.
+    ///
+    /// Uses a precomputed static table for epochs 0..100 (O(1) lookup).
+    /// Epochs >= 100 always return TERMINAL_INFLATION_RATE_BPS.
     pub fn inflation_rate_bps(epoch: u64) -> u64 {
-        // Fast path: after ~100 epochs the rate converges to terminal
         if epoch >= 100 {
             return TERMINAL_INFLATION_RATE_BPS;
         }
-        let mut rate = INITIAL_INFLATION_RATE_BPS;
-        for _ in 0..epoch {
-            rate = rate.saturating_sub(rate * TAPER_RATE_BPS / 10_000);
-            if rate <= TERMINAL_INFLATION_RATE_BPS {
-                return TERMINAL_INFLATION_RATE_BPS;
-            }
-        }
-        rate
+        INFLATION_RATE_TABLE[epoch as usize]
     }
 
     /// Calculate the total inflation rewards for an epoch given the total supply.
@@ -98,15 +115,21 @@ impl RewardsCalculator {
             return Err(ConsensusError::ZeroTotalStake);
         }
 
+        // B13: build vote_map once (O(V)) to avoid O(D*V) repeated linear scans.
+        let vote_map: std::collections::HashMap<&Hash, &VoteState> =
+            vote_states.iter().map(|(a, vs)| (a, vs)).collect();
+
         // Calculate total points: credits * stake for each delegation
         let mut total_points: u128 = 0;
         let mut delegation_points: Vec<(usize, u128)> = Vec::with_capacity(delegations.len());
 
         for (i, (_, delegation)) in delegations.iter().enumerate() {
-            let credits = Self::get_epoch_credits(epoch, &delegation.voter_pubkey, vote_states);
+            let credits =
+                Self::get_epoch_credits_from_map(epoch, &delegation.voter_pubkey, &vote_map);
             let points = credits as u128 * delegation.stake as u128;
             delegation_points.push((i, points));
-            total_points += points;
+            // B9: saturating add to prevent overflow on extremely large point totals.
+            total_points = total_points.saturating_add(points);
         }
 
         if total_points == 0 {
@@ -117,9 +140,9 @@ impl RewardsCalculator {
         // Keep a scale factor of 1_000_000 for sub-lamport precision.
         let point_value_scaled = inflation_rewards as u128 * 1_000_000 / total_points;
 
-        // Calculate individual rewards and partition them
-        let mut partitions: Vec<Vec<RewardEntry>> =
-            (0..PARTITION_COUNT).map(|_| Vec::new()).collect();
+        // Calculate individual rewards and partition them.
+        // HashMap: only non-empty partitions consume memory (B20).
+        let mut partitions: HashMap<u32, Vec<RewardEntry>> = HashMap::new();
         let mut total_distributed: u64 = 0;
 
         for &(idx, points) in &delegation_points {
@@ -135,11 +158,11 @@ impl RewardsCalculator {
                 continue;
             }
 
-            // Find commission for this voter
-            let commission = vote_states
-                .iter()
-                .find(|(addr, _)| *addr == delegation.voter_pubkey)
-                .map(|(_, vs)| vs.commission)
+            // B13: look up commission via vote_map (O(1)) instead of linear scan.
+            // B9: clamp commission to 100 before computing validator share.
+            let commission = vote_map
+                .get(&delegation.voter_pubkey)
+                .map(|vs| vs.commission.min(100))
                 .unwrap_or(0);
 
             // Use u128 intermediate for commission split to avoid overflow
@@ -147,9 +170,9 @@ impl RewardsCalculator {
             let staker_share = reward_lamports.saturating_sub(validator_share);
 
             // Partition by hash(stake_account) % PARTITION_COUNT
-            let partition_idx = partition_index(stake_account);
+            let partition_idx = partition_index(stake_account) as u32;
 
-            partitions[partition_idx as usize].push(RewardEntry {
+            partitions.entry(partition_idx).or_default().push(RewardEntry {
                 stake_account: *stake_account,
                 vote_account: delegation.voter_pubkey,
                 lamports: staker_share,
@@ -158,14 +181,15 @@ impl RewardsCalculator {
                 commission,
             });
 
-            total_distributed += staker_share + validator_share;
+            // B9: saturating_add prevents overflow when distributing many rewards.
+            total_distributed = total_distributed.saturating_add(staker_share + validator_share);
         }
 
         // Distribute remainder from truncation to the first non-empty partition entry.
         // This ensures total_distributed == inflation_rewards when possible.
         let remainder = inflation_rewards.saturating_sub(total_distributed);
         if remainder > 0
-            && let Some(first_entry) = partitions.iter_mut().flat_map(|p| p.iter_mut()).next()
+            && let Some(first_entry) = partitions.values_mut().flat_map(|p| p.iter_mut()).next()
         {
             first_entry.lamports = first_entry.lamports.saturating_add(remainder);
             first_entry.post_balance = first_entry.post_balance.saturating_add(remainder);
@@ -186,21 +210,33 @@ impl RewardsCalculator {
         })
     }
 
-    fn get_epoch_credits(
+    /// B13: O(1) lookup via pre-built vote_map.
+    fn get_epoch_credits_from_map(
         epoch: u64,
         voter_pubkey: &Hash,
-        vote_states: &[(Hash, VoteState)],
+        vote_map: &std::collections::HashMap<&Hash, &VoteState>,
     ) -> u64 {
-        vote_states
-            .iter()
-            .find(|(addr, _)| addr == voter_pubkey)
-            .and_then(|(_, vs)| {
+        vote_map
+            .get(voter_pubkey)
+            .and_then(|vs| {
                 vs.epoch_credits
                     .iter()
                     .find(|(e, _, _)| *e == epoch)
                     .map(|(_, credits, prev_credits)| credits.saturating_sub(*prev_credits))
             })
             .unwrap_or(0)
+    }
+
+    /// Kept for backward compatibility; delegates to the map-based variant.
+    #[allow(dead_code)]
+    fn get_epoch_credits(
+        epoch: u64,
+        voter_pubkey: &Hash,
+        vote_states: &[(Hash, VoteState)],
+    ) -> u64 {
+        let vote_map: std::collections::HashMap<&Hash, &VoteState> =
+            vote_states.iter().map(|(a, vs)| (a, vs)).collect();
+        Self::get_epoch_credits_from_map(epoch, voter_pubkey, &vote_map)
     }
 }
 
@@ -215,6 +251,7 @@ fn partition_index(account: &Hash) -> u64 {
 
 impl RewardDistributionStatus {
     pub fn new(epoch: u64, rewards: &EpochRewards) -> Self {
+        // Only count non-empty partitions; empty entries are not present in the HashMap.
         Self {
             epoch,
             total_partitions: rewards.partitions.len() as u32,
@@ -301,7 +338,7 @@ mod tests {
         // Check partitions contain the reward (staker + commission)
         let total_in_partitions: u64 = rewards
             .partitions
-            .iter()
+            .values()
             .flat_map(|p| p.iter())
             .map(|e| e.lamports + e.commission_lamports)
             .sum();
@@ -337,7 +374,7 @@ mod tests {
         let mut status = RewardDistributionStatus::new(1, &rewards);
         assert!(!status.is_complete());
 
-        for partition in &rewards.partitions {
+        for partition in rewards.partitions.values() {
             let partition_total: u64 = partition.iter().map(|e| e.lamports).sum();
             status.record_partition_distributed(partition_total);
         }
@@ -370,8 +407,9 @@ mod tests {
             RewardsCalculator::calculate_epoch_rewards(1, 100_000_000, &vote_states, &delegations)
                 .unwrap();
 
-        let non_empty: usize = rewards.partitions.iter().filter(|p| !p.is_empty()).count();
-        // With 100 stakers and 4096 partitions, most will be empty but some should be populated
+        // HashMap only contains non-empty partitions — count directly.
+        let non_empty = rewards.partitions.len();
+        // With 100 stakers and 4096 partitions, each staker hashes to a different bucket
         assert!(non_empty > 0);
         assert!(non_empty <= 100);
     }
@@ -457,7 +495,7 @@ mod tests {
         // Cross-check: sum from partitions should match
         let sum_from_partitions: u64 = rewards
             .partitions
-            .iter()
+            .values()
             .flat_map(|p| p.iter())
             .map(|e| e.lamports + e.commission_lamports)
             .sum();

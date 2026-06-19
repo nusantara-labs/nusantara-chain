@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use nusantara_core::commitment::CommitmentLevel;
 use nusantara_core::native_token::const_parse_u64;
@@ -12,6 +12,9 @@ pub const MAX_UNCONFIRMED_DEPTH: u64 =
 pub const DUPLICATE_THRESHOLD_PERCENTAGE: u64 =
     const_parse_u64(env!("NUSA_FORK_CHOICE_DUPLICATE_THRESHOLD_PERCENTAGE"));
 
+/// B28: hoisted constant for max fork tree nodes.
+pub const MAX_FORK_TREE_NODES: usize = MAX_UNCONFIRMED_DEPTH as usize * 4;
+
 #[derive(Clone, Debug)]
 pub struct ForkNode {
     pub slot: u64,
@@ -23,6 +26,8 @@ pub struct ForkNode {
     pub subtree_stake: u64,
     pub is_connected: bool,
     pub commitment: CommitmentLevel,
+    /// Voters whose stake has already been counted for this slot (B1 dedup).
+    pub voters_seen: HashSet<Hash>,
 }
 
 pub struct ForkTree {
@@ -30,6 +35,9 @@ pub struct ForkTree {
     root_slot: u64,
     best_slot: u64,
     total_active_stake: u64,
+    /// First slot each voter cast a vote on — prevents double-counting across
+    /// slots in the same fork session (B1: first-vote-wins).
+    validator_to_voted_slot: HashMap<Hash, u64>,
 }
 
 impl ForkTree {
@@ -47,6 +55,7 @@ impl ForkTree {
                 subtree_stake: 0,
                 is_connected: true,
                 commitment: CommitmentLevel::Finalized,
+                voters_seen: HashSet::new(),
             },
         );
         Self {
@@ -54,6 +63,7 @@ impl ForkTree {
             root_slot,
             best_slot: root_slot,
             total_active_stake: 0,
+            validator_to_voted_slot: HashMap::new(),
         }
     }
 
@@ -94,12 +104,11 @@ impl ForkTree {
             return Err(ConsensusError::SlotAlreadyProcessed(slot));
         }
 
-        // Cap total nodes to prevent unbounded memory growth
-        let max_nodes = MAX_UNCONFIRMED_DEPTH as usize * 4;
-        if self.nodes.len() >= max_nodes {
+        // Cap total nodes to prevent unbounded memory growth (B28: use hoisted constant).
+        if self.nodes.len() >= MAX_FORK_TREE_NODES {
             return Err(ConsensusError::MaxDepthExceeded {
                 depth: self.nodes.len() as u64,
-                max: max_nodes as u64,
+                max: MAX_FORK_TREE_NODES as u64,
             });
         }
 
@@ -123,6 +132,7 @@ impl ForkTree {
                 subtree_stake: 0,
                 is_connected,
                 commitment: CommitmentLevel::Processed,
+                voters_seen: HashSet::new(),
             },
         );
 
@@ -130,18 +140,45 @@ impl ForkTree {
         Ok(())
     }
 
-    /// Add a vote for a slot, propagating subtree_stake up to root.
-    /// Returns `false` if the slot is not in the tree (vote is dropped).
+    /// Add a vote for a slot from `voter`, propagating subtree_stake up to root.
+    ///
+    /// Returns `false` if:
+    /// - The slot is not in the fork tree (vote dropped).
+    /// - The voter already voted for this exact slot (idempotent same-slot revote).
+    /// - The voter previously voted for a *different* slot (cross-slot revote rejected).
+    ///   Tower BFT lockout enforces single-slot-per-validator externally; ForkTree
+    ///   must not silently switch the recorded vote and double-count ancestor stake.
     #[instrument(skip(self), level = "debug")]
-    pub fn add_vote(&mut self, slot: u64, stake: u64) -> bool {
-        // Update the voted slot
+    pub fn add_vote(&mut self, slot: u64, voter: Hash, stake: u64) -> bool {
+        // B1 cross-slot guard: check validator_to_voted_slot before touching any node.
+        if let Some(&prev_slot) = self.validator_to_voted_slot.get(&voter) {
+            if prev_slot == slot {
+                // Idempotent same-slot revote — no change.
+                return false;
+            }
+            // Cross-slot revote rejected. The Tower lockout logic is responsible
+            // for ensuring validators don't vote on conflicting slots; accepting
+            // this here would double-count ancestor stake.
+            return false;
+        }
+
+        // First vote from this validator for this slot.
         if let Some(node) = self.nodes.get_mut(&slot) {
+            // voters_seen provides an additional per-node sanity check.
+            if !node.voters_seen.insert(voter) {
+                // Should not reach here given the validator_to_voted_slot guard above,
+                // but guard defensively.
+                return false;
+            }
             node.stake_voted = node.stake_voted.saturating_add(stake);
         } else {
             return false;
         }
 
-        // Propagate subtree_stake up
+        // Record this voter's slot before propagating so any re-entrant call is rejected.
+        self.validator_to_voted_slot.insert(voter, slot);
+
+        // Propagate subtree_stake up the ancestry chain.
         let mut current = slot;
         while let Some(node) = self.nodes.get_mut(&current) {
             node.subtree_stake = node.subtree_stake.saturating_add(stake);
@@ -184,11 +221,15 @@ impl ForkTree {
     }
 
     /// Set a new root, pruning all slots that are not ancestors of the new root.
-    /// Returns the list of pruned slot numbers.
+    /// Returns the list of pruned slot numbers, or `Err(InvalidRoot)` if
+    /// `new_root` is not present in the fork tree (B2).
     #[instrument(skip(self), level = "info")]
-    pub fn set_root(&mut self, new_root: u64) -> Vec<u64> {
+    pub fn set_root(&mut self, new_root: u64) -> Result<Vec<u64>, ConsensusError> {
+        if !self.nodes.contains_key(&new_root) {
+            return Err(ConsensusError::InvalidRoot(new_root));
+        }
         if new_root <= self.root_slot {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Find ancestry from new_root to old root
@@ -231,10 +272,13 @@ impl ForkTree {
         }
 
         self.root_slot = new_root;
+        // Also clear the per-validator slot tracking for the pruned history —
+        // after root advance the old assignments are stale.
+        self.validator_to_voted_slot.retain(|_, voted_slot| *voted_slot >= new_root);
         metrics::gauge!("nusantara_fork_tree_root_slot").set(new_root as f64);
         metrics::gauge!("nusantara_fork_tree_node_count").set(self.nodes.len() as f64);
 
-        pruned
+        Ok(pruned)
     }
 
     fn collect_subtree(&self, root: u64, reachable: &mut std::collections::HashSet<u64>) {
@@ -278,47 +322,47 @@ impl ForkTree {
     }
 
     /// Try to reconnect orphan slots after their parent is added.
+    ///
+    /// B17: single-pass BFS — O(N) instead of the previous O(N²) fixed-point loop.
+    /// Builds a parent→children map for orphan nodes once, then BFS from all
+    /// already-connected nodes to propagate `is_connected` to their orphan children.
     #[instrument(skip(self), level = "debug")]
     pub fn try_reconnect_orphans(&mut self) {
-        // Iterate until no more progress — each pass may reconnect nodes whose
-        // parents were reconnected in a previous pass.
-        loop {
-            let mut reconnected = 0u64;
-            let mut slots: Vec<u64> = self.nodes.keys().copied().collect();
-            slots.sort_unstable();
-
-            for slot in slots {
-                let (parent_slot, parent_connected) = {
-                    let Some(node) = self.nodes.get(&slot) else {
-                        continue;
-                    };
-                    if node.is_connected {
-                        continue;
-                    }
-                    let Some(parent) = node.parent_slot else {
-                        continue;
-                    };
-                    let Some(parent_node) = self.nodes.get(&parent) else {
-                        continue;
-                    };
-                    (parent, parent_node.is_connected)
-                };
-
-                if parent_connected {
-                    if let Some(node) = self.nodes.get_mut(&slot) {
-                        node.is_connected = true;
-                    }
-                    if let Some(parent_node) = self.nodes.get_mut(&parent_slot)
-                        && !parent_node.children.contains(&slot)
-                    {
-                        parent_node.children.push(slot);
-                    }
-                    reconnected += 1;
-                }
+        // Build orphan_children: parent_slot -> Vec<child_slot> for disconnected nodes.
+        let mut orphan_children: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (&slot, node) in &self.nodes {
+            if !node.is_connected && let Some(parent) = node.parent_slot {
+                orphan_children.entry(parent).or_default().push(slot);
             }
+        }
 
-            if reconnected == 0 {
-                break;
+        if orphan_children.is_empty() {
+            return;
+        }
+
+        // BFS: start from all currently connected nodes.
+        let mut queue: VecDeque<u64> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.is_connected)
+            .map(|(&s, _)| s)
+            .collect();
+
+        while let Some(parent_slot) = queue.pop_front() {
+            let Some(children) = orphan_children.remove(&parent_slot) else {
+                continue;
+            };
+            for child_slot in children {
+                if let Some(child_node) = self.nodes.get_mut(&child_slot) {
+                    child_node.is_connected = true;
+                }
+                // Register child in parent's children list if absent.
+                if let Some(parent_node) = self.nodes.get_mut(&parent_slot)
+                    && !parent_node.children.contains(&child_slot)
+                {
+                    parent_node.children.push(child_slot);
+                }
+                queue.push_back(child_slot);
             }
         }
     }
@@ -333,10 +377,15 @@ mod tests {
         hash(s.as_bytes())
     }
 
+    fn voter(s: &str) -> Hash {
+        hash(s.as_bytes())
+    }
+
     #[test]
     fn config_values() {
         assert_eq!(MAX_UNCONFIRMED_DEPTH, 64);
         assert_eq!(DUPLICATE_THRESHOLD_PERCENTAGE, 52);
+        assert_eq!(MAX_FORK_TREE_NODES, 256);
     }
 
     #[test]
@@ -381,9 +430,9 @@ mod tests {
         tree.add_slot(4, 3, h("b4"), h("bk4")).unwrap();
 
         // Add more stake to fork A
-        tree.add_vote(2, 100);
+        tree.add_vote(2, voter("v1"), 100);
         // Less stake to fork B
-        tree.add_vote(4, 50);
+        tree.add_vote(4, voter("v2"), 50);
 
         let best = tree.compute_best_fork();
         assert_eq!(best, 2); // Fork A is heavier
@@ -395,12 +444,26 @@ mod tests {
         tree.add_slot(1, 0, h("b1"), h("bk1")).unwrap();
         tree.add_slot(2, 1, h("b2"), h("bk2")).unwrap();
 
-        tree.add_vote(2, 100);
+        tree.add_vote(2, voter("v1"), 100);
 
         // Stake should propagate up
         assert_eq!(tree.get_node(2).unwrap().subtree_stake, 100);
         assert_eq!(tree.get_node(1).unwrap().subtree_stake, 100);
         assert_eq!(tree.get_node(0).unwrap().subtree_stake, 100);
+    }
+
+    #[test]
+    fn vote_dedup_same_voter() {
+        let mut tree = ForkTree::new(0, h("b0"), h("bk0"));
+        tree.add_slot(1, 0, h("b1"), h("bk1")).unwrap();
+
+        let v = voter("alice");
+        assert!(tree.add_vote(1, v, 500));
+        // Second vote from same voter must be rejected
+        assert!(!tree.add_vote(1, v, 500));
+        // Stake must not be doubled
+        assert_eq!(tree.get_node(1).unwrap().stake_voted, 500);
+        assert_eq!(tree.get_node(1).unwrap().subtree_stake, 500);
     }
 
     #[test]
@@ -413,13 +476,22 @@ mod tests {
         // Fork B: 0 -> 4
         tree.add_slot(4, 0, h("b4"), h("bk4")).unwrap();
 
-        let pruned = tree.set_root(2);
+        let pruned = tree.set_root(2).unwrap();
         assert!(pruned.contains(&4)); // Fork B pruned
         assert!(pruned.contains(&0)); // Old root pruned
         assert!(pruned.contains(&1)); // Intermediate pruned
         assert!(tree.contains(2)); // New root exists
         assert!(tree.contains(3)); // Child of new root exists
         assert_eq!(tree.root_slot(), 2);
+    }
+
+    #[test]
+    fn set_root_nonexistent_returns_error() {
+        let mut tree = ForkTree::new(0, h("b0"), h("bk0"));
+        tree.add_slot(1, 0, h("b1"), h("bk1")).unwrap();
+        // Slot 99 does not exist — must return Err(InvalidRoot)
+        let result = tree.set_root(99);
+        assert!(matches!(result, Err(ConsensusError::InvalidRoot(99))));
     }
 
     #[test]
@@ -440,11 +512,63 @@ mod tests {
         tree.add_slot(2, 0, h("b2"), h("bk2")).unwrap();
 
         // Fork A initially heaviest
-        tree.add_vote(1, 100);
+        tree.add_vote(1, voter("v1"), 100);
         assert_eq!(tree.compute_best_fork(), 1);
 
         // Fork B overtakes
-        tree.add_vote(2, 200);
+        tree.add_vote(2, voter("v2"), 200);
         assert_eq!(tree.compute_best_fork(), 2);
+    }
+
+    /// F1 regression: voter V votes slot 5 then attempts a cross-slot revote on
+    /// slot 3 (an ancestor). The second call must return false and the ancestor
+    /// subtree_stake must remain unchanged from after the first vote.
+    #[test]
+    fn cross_slot_revote_rejected() {
+        let mut tree = ForkTree::new(0, h("b0"), h("bk0"));
+        // Build chain: 0 -> 1 -> 2 -> 3 -> 4 -> 5
+        for slot in 1..=5 {
+            tree.add_slot(slot, slot - 1, h(&format!("b{slot}")), h(&format!("bk{slot}")))
+                .unwrap();
+        }
+
+        let v = voter("validator_v");
+
+        // First vote: V votes for slot 5 with 100 stake.
+        assert!(tree.add_vote(5, v, 100));
+
+        // Stake must have propagated to all ancestors.
+        for anc in 0..=5 {
+            assert_eq!(
+                tree.get_node(anc).unwrap().subtree_stake,
+                100,
+                "slot {anc} should have subtree_stake=100 after first vote"
+            );
+        }
+
+        // Cross-slot revote: V tries to vote for slot 3 — must be rejected.
+        assert!(!tree.add_vote(3, v, 100));
+
+        // Ancestor subtree_stake must be unchanged (no double-count).
+        for anc in 0..=5 {
+            assert_eq!(
+                tree.get_node(anc).unwrap().subtree_stake,
+                100,
+                "slot {anc} subtree_stake must not change after rejected cross-slot revote"
+            );
+        }
+    }
+
+    /// Idempotent same-slot revote must also return false and not change stake.
+    #[test]
+    fn same_slot_revote_idempotent() {
+        let mut tree = ForkTree::new(0, h("b0"), h("bk0"));
+        tree.add_slot(1, 0, h("b1"), h("bk1")).unwrap();
+
+        let v = voter("v_idem");
+        assert!(tree.add_vote(1, v, 200));
+        assert!(!tree.add_vote(1, v, 200)); // same slot — idempotent, no change
+        assert_eq!(tree.get_node(1).unwrap().stake_voted, 200);
+        assert_eq!(tree.get_node(0).unwrap().subtree_stake, 200);
     }
 }

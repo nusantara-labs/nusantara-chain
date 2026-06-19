@@ -1,10 +1,13 @@
 use dashmap::DashMap;
+use nusantara_core::native_token::const_parse_u64;
 use nusantara_crypto::Hash;
 use nusantara_storage::SlashProof;
 use tracing::info;
 
-/// Default slash penalty: 5% of delegated stake per equivocation (500 basis points).
-pub const SLASH_PENALTY_BPS: u64 = 500;
+/// Slash penalty in basis points (5% = 500 bps).
+/// B23: sourced from config.toml via build.rs instead of a hardcoded literal.
+pub const SLASH_PENALTY_BPS: u64 =
+    const_parse_u64(env!("NUSA_SLASHING_PENALTY_BPS"));
 
 /// Detects double-voting (equivocation) from gossip votes.
 ///
@@ -43,9 +46,11 @@ impl SlashDetector {
                 let first_hash = *entry.get();
                 if first_hash != *hash {
                     // Double vote detected
+                    // B24: unwrap_or(Duration::ZERO) instead of expect() — protects
+                    // against clocks set before the UNIX epoch (adversarial or misconfigured).
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .expect("system clock before UNIX epoch")
+                        .unwrap_or(std::time::Duration::ZERO)
                         .as_secs() as i64;
 
                     let proof = SlashProof {
@@ -58,7 +63,7 @@ impl SlashDetector {
                     };
 
                     info!(
-                        validator = %validator.to_base64(),
+                        validator = %validator.to_base58(),
                         slot,
                         "double vote detected"
                     );

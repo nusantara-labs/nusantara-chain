@@ -63,17 +63,17 @@ fn test_tower_fork_lockout_enforcement() {
 fn test_tower_switch_threshold() {
     let tower = make_tower();
 
-    // 38% threshold - should pass with >= 38%
+    // 38% threshold - should pass with >= 38% (B26: no switch_slot param)
     let stakes_above = vec![(hash(b"v1"), 40)];
-    assert!(tower.check_switch_threshold(10, &stakes_above, 100));
+    assert!(tower.check_switch_threshold(&stakes_above, 100));
 
     // Should fail with < 38%
     let stakes_below = vec![(hash(b"v1"), 37)];
-    assert!(!tower.check_switch_threshold(10, &stakes_below, 100));
+    assert!(!tower.check_switch_threshold(&stakes_below, 100));
 
     // Exactly 38% - should pass
     let stakes_exact = vec![(hash(b"v1"), 38)];
-    assert!(tower.check_switch_threshold(10, &stakes_exact, 100));
+    assert!(tower.check_switch_threshold(&stakes_exact, 100));
 }
 
 #[test]

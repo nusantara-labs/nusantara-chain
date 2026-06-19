@@ -65,15 +65,17 @@ impl ConsensusBank {
         // Try to get block header to restore timestamp
         if let Some(header) = storage.get_block_header(slot)? {
             let epoch = self.epoch_schedule.get_epoch(slot);
-            let mut clock = self.clock.write();
+            let mut guard = self.clock.write();
+            let clock = std::sync::Arc::make_mut(&mut *guard);
             clock.slot = slot;
             clock.unix_timestamp = header.timestamp;
             clock.epoch = epoch;
-            clock.leader_schedule_epoch = epoch + 1;
+            clock.leader_schedule_epoch = epoch.saturating_add(1);
         }
 
         // Rebuild slot_hashes: keep only entries at or before the target slot
-        let mut slot_hashes = self.slot_hashes.write();
+        let mut guard = self.slot_hashes.write();
+        let slot_hashes = std::sync::Arc::make_mut(&mut *guard);
         slot_hashes.0.retain(|(s, _)| *s <= slot);
 
         Ok(())

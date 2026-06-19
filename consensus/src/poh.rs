@@ -108,24 +108,36 @@ impl PohRecorder {
 }
 
 /// CPU verification of a PoH entry chain.
-/// Each entry's hash must be reproducible from the previous hash
-/// by iterating sha3_512 for (entry.num_hashes - prev_num_hashes) times.
+///
+/// Each entry's `num_hashes` must be strictly greater than the previous entry's
+/// (B6: monotonicity). The initial `prev_num` is 0, so the first entry must
+/// have `num_hashes > 0`.
+///
+/// Returns `Err(PohVerificationFailed { index })` on first failure so callers
+/// can distinguish monotonicity failures from hash-chain failures.
 #[instrument(skip(initial_hash, entries), level = "debug")]
-pub fn verify_poh_entries(initial_hash: &Hash, entries: &[PohEntry]) -> bool {
+pub fn verify_poh_entries(
+    initial_hash: &Hash,
+    entries: &[PohEntry],
+) -> Result<(), ConsensusError> {
     let mut current = *initial_hash;
     let mut prev_num = 0u64;
 
-    for entry in entries {
-        let iterations = entry.num_hashes.saturating_sub(prev_num);
+    for (i, entry) in entries.iter().enumerate() {
+        // B6: num_hashes must be strictly monotone.
+        if entry.num_hashes <= prev_num {
+            return Err(ConsensusError::PohVerificationFailed { index: i });
+        }
+        let iterations = entry.num_hashes - prev_num;
         for _ in 0..iterations {
             current = hash(current.as_bytes());
         }
         if current != entry.hash {
-            return false;
+            return Err(ConsensusError::PohVerificationFailed { index: i });
         }
         prev_num = entry.num_hashes;
     }
-    true
+    Ok(())
 }
 
 /// Verify a PoH chain with optional transaction mixins.
@@ -138,6 +150,11 @@ pub fn verify_poh_chain(
     let mut current = *initial_hash;
 
     for (i, (num_hashes, mixin, expected)) in entries.iter().enumerate() {
+        // B7: (0, Some(_), _) is invalid — a mixin requires at least 1 hash iteration.
+        if *num_hashes == 0 && mixin.is_some() {
+            return Err(ConsensusError::PohVerificationFailed { index: i });
+        }
+
         // Hash iterations before the mixin (if any)
         let pre_mixin_hashes = if mixin.is_some() {
             num_hashes.saturating_sub(1)
@@ -223,7 +240,7 @@ mod tests {
             entries.push(tick.entry);
         }
 
-        assert!(verify_poh_entries(&init, &entries));
+        assert!(verify_poh_entries(&init, &entries).is_ok());
     }
 
     #[test]
@@ -239,7 +256,23 @@ mod tests {
 
         // Tamper with middle entry
         entries[1].hash = hash(b"tampered");
-        assert!(!verify_poh_entries(&init, &entries));
+        assert!(verify_poh_entries(&init, &entries).is_err());
+    }
+
+    #[test]
+    fn poh_verify_monotonicity_enforced() {
+        let init = hash(b"genesis");
+        let mut recorder = PohRecorder::new(init);
+
+        let mut entries = Vec::new();
+        for _ in 0..3 {
+            entries.push(recorder.tick().entry);
+        }
+
+        // Break monotonicity: make entry[1].num_hashes == entry[0].num_hashes
+        entries[1].num_hashes = entries[0].num_hashes;
+        let result = verify_poh_entries(&init, &entries);
+        assert!(result.is_err());
     }
 
     #[test]

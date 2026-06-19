@@ -316,7 +316,7 @@ fn distribute_epoch_rewards_blocking(
             let mut delegation_updates: Vec<(Hash, u64)> = Vec::new();
             let mut deltas: Vec<(Hash, Account)> = Vec::new();
 
-            for partition in &rewards.partitions {
+            for partition in rewards.partitions.values() {
                 for entry in partition {
                     if let Ok(Some(mut account)) =
                         storage.get_account(&entry.stake_account)

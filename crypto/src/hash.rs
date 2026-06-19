@@ -57,7 +57,11 @@ impl Hash {
         Ok(Self(arr))
     }
 
-
+    /// Encode this hash as Base58 for user-facing display (addresses, tx hashes, etc.).
+    /// Base58 avoids ambiguous characters (0/O, 1/I/l) making it human-friendly.
+    pub fn to_base58(&self) -> String {
+        bs58::encode(self.0).into_string()
+    }
 }
 
 impl fmt::Debug for Hash {

@@ -6,15 +6,19 @@ use crate::bank::FrozenBankState;
 use crate::error::ConsensusError;
 use crate::poh::{PohEntry, verify_poh_entries};
 use crate::replay_stage::{ReplayResult, ReplayStage};
-use crate::replay_vote_processing::extract_vote_from_transaction;
+use crate::replay_vote_processing::extract_votes_from_transaction;
 
 impl ReplayStage {
     /// Replay a block through the consensus pipeline.
-    #[instrument(skip(self, block, poh_entries), fields(slot = block.header.slot), level = "info")]
+    ///
+    /// `parent_poh` is the PoH hash at the end of the parent slot — used as the
+    /// initial hash for verifying the first entry in `poh_entries` (B3).
+    #[instrument(skip(self, block, poh_entries, parent_poh), fields(slot = block.header.slot), level = "info")]
     pub fn replay_block(
         &mut self,
         block: &Block,
         poh_entries: &[PohEntry],
+        parent_poh: &Hash,
     ) -> Result<ReplayResult, ConsensusError> {
         let slot = block.header.slot;
         let parent_slot = block.header.parent_slot;
@@ -30,41 +34,52 @@ impl ReplayStage {
         {
             return Err(ConsensusError::WrongLeader {
                 slot,
-                expected: format!("{expected_leader:?}"),
-                got: format!("{:?}", block.header.validator),
+                expected: expected_leader.to_base58(),
+                got: block.header.validator.to_base58(),
             });
         }
 
-        // 2. Verify PoH entries (GPU batch if available, else CPU)
+        // 2. Verify PoH entries — verify from parent_poh through the full slice (B3).
+        // Entry 0 is verified against parent_poh (previously skipped with [1..]).
         if !poh_entries.is_empty() {
             let poh_valid = if let Some(ref gpu) = self.gpu_verifier {
-                let entries: Vec<(Hash, u64, Hash)> = poh_entries
-                    .windows(2)
-                    .map(|w| {
-                        let delta = w[1]
-                            .num_hashes
-                            .checked_sub(w[0].num_hashes)
-                            .ok_or(ConsensusError::PohVerificationFailed { index: 0 })?;
-                        Ok((w[0].hash, delta, w[1].hash))
-                    })
-                    .collect::<Result<Vec<_>, ConsensusError>>()?;
-                if entries.is_empty() {
-                    true
-                } else if entries.iter().any(|(_, delta, _)| *delta > u32::MAX as u64) {
-                    // GPU shader uses u32 for num_hashes; fall back to CPU for large deltas
+                // Build GPU windows: (initial_hash, delta, expected_hash).
+                // The first window uses parent_poh as the initial hash (B3).
+                let mut gpu_entries: Vec<(Hash, u64, Hash)> =
+                    Vec::with_capacity(poh_entries.len());
+
+                // First entry: parent_poh -> poh_entries[0]
+                let first_delta = poh_entries[0].num_hashes;
+                gpu_entries.push((*parent_poh, first_delta, poh_entries[0].hash));
+
+                // Remaining entries: poh_entries[i] -> poh_entries[i+1]
+                for w in poh_entries.windows(2) {
+                    let delta = w[1]
+                        .num_hashes
+                        .checked_sub(w[0].num_hashes)
+                        .ok_or(ConsensusError::PohVerificationFailed { index: 0 })?;
+                    gpu_entries.push((w[0].hash, delta, w[1].hash));
+                }
+
+                if gpu_entries.iter().any(|(_, delta, _)| *delta > u32::MAX as u64) {
                     tracing::warn!("PoH delta exceeds u32::MAX, falling back to CPU");
-                    verify_poh_entries(&poh_entries[0].hash, &poh_entries[1..])
+                    // B5: block_in_place keeps the async caller from blocking the executor.
+                    let result = verify_poh_entries(parent_poh, poh_entries);
+                    result.is_ok()
                 } else {
-                    match gpu.verify_batch(&entries) {
+                    // B5: GPU polling is blocking — use block_in_place so tokio can park
+                    // the thread instead of blocking the runtime's thread pool.
+                    let gpu_result = tokio::task::block_in_place(|| gpu.verify_batch(&gpu_entries));
+                    match gpu_result {
                         Ok(results) => results.iter().all(|&r| r),
                         Err(_) => {
                             tracing::warn!("GPU verification failed, falling back to CPU");
-                            verify_poh_entries(&poh_entries[0].hash, &poh_entries[1..])
+                            verify_poh_entries(parent_poh, poh_entries).is_ok()
                         }
                     }
                 }
             } else {
-                verify_poh_entries(&poh_entries[0].hash, &poh_entries[1..])
+                verify_poh_entries(parent_poh, poh_entries).is_ok()
             };
 
             if !poh_valid {
@@ -100,7 +115,8 @@ impl ReplayStage {
         let root_slot = self.tower.root_slot().unwrap_or(0);
 
         for tx in &block.transactions {
-            if let Some((voter, vote)) = extract_vote_from_transaction(tx) {
+            // B11: extract_votes_from_transaction returns all votes in the tx.
+            for (voter, vote) in extract_votes_from_transaction(tx) {
                 let highest_vote_slot = vote.slots.last().copied().unwrap_or(0);
                 if highest_vote_slot <= root_slot {
                     continue;
@@ -114,7 +130,8 @@ impl ReplayStage {
                     match self.tower.process_vote(&vote) {
                         Ok(result) => {
                             if let Some(&voted_slot) = vote.slots.last() {
-                                self.fork_tree.add_vote(voted_slot, stake);
+                                // B1: pass voter identity to deduplicate stake.
+                                self.fork_tree.add_vote(voted_slot, voter, stake);
                                 let voted_block_hash = self
                                     .fork_tree
                                     .get_node(voted_slot)
@@ -123,6 +140,7 @@ impl ReplayStage {
                                 self.commitment_tracker.record_vote(
                                     voted_slot,
                                     voted_block_hash,
+                                    voter,
                                     stake,
                                 );
                             }
@@ -140,14 +158,15 @@ impl ReplayStage {
                 } else {
                     // Other validator's vote — update fork weights only, no lockout check
                     if let Some(&voted_slot) = vote.slots.last() {
-                        self.fork_tree.add_vote(voted_slot, stake);
+                        // B1: pass voter identity to deduplicate stake.
+                        self.fork_tree.add_vote(voted_slot, voter, stake);
                         let voted_block_hash = self
                             .fork_tree
                             .get_node(voted_slot)
                             .map(|n| n.block_hash)
                             .unwrap_or(vote.hash);
                         self.commitment_tracker
-                            .record_vote(voted_slot, voted_block_hash, stake);
+                            .record_vote(voted_slot, voted_block_hash, voter, stake);
                     }
                     vote_count += 1;
                 }
@@ -194,13 +213,15 @@ impl ReplayStage {
 
 #[cfg(test)]
 mod tests {
+    use nusantara_crypto::Hash;
+
     use crate::test_utils::test_helpers::{make_block, make_replay_stage};
 
     #[test]
     fn replay_empty_block() {
         let (mut stage, _dir) = make_replay_stage();
         let block = make_block(1, 0);
-        let result = stage.replay_block(&block, &[]).unwrap();
+        let result = stage.replay_block(&block, &[], &Hash::zero()).unwrap();
         assert_eq!(result.slot, 1);
         assert_eq!(result.vote_count, 0);
         assert!(result.new_root.is_none());
@@ -211,7 +232,7 @@ mod tests {
         let (mut stage, _dir) = make_replay_stage();
         for slot in 1..=5 {
             let block = make_block(slot, slot - 1);
-            let result = stage.replay_block(&block, &[]).unwrap();
+            let result = stage.replay_block(&block, &[], &Hash::zero()).unwrap();
             assert_eq!(result.slot, slot);
         }
         assert_eq!(stage.fork_tree().node_count(), 6); // root + 5 blocks
@@ -221,10 +242,10 @@ mod tests {
     fn replay_fork() {
         let (mut stage, _dir) = make_replay_stage();
         // Linear: 0 -> 1 -> 2
-        stage.replay_block(&make_block(1, 0), &[]).unwrap();
-        stage.replay_block(&make_block(2, 1), &[]).unwrap();
+        stage.replay_block(&make_block(1, 0), &[], &Hash::zero()).unwrap();
+        stage.replay_block(&make_block(2, 1), &[], &Hash::zero()).unwrap();
         // Fork: 0 -> 3
-        stage.replay_block(&make_block(3, 0), &[]).unwrap();
+        stage.replay_block(&make_block(3, 0), &[], &Hash::zero()).unwrap();
 
         assert_eq!(stage.fork_tree().node_count(), 4);
     }
@@ -232,8 +253,8 @@ mod tests {
     #[test]
     fn replay_duplicate_slot_fails() {
         let (mut stage, _dir) = make_replay_stage();
-        stage.replay_block(&make_block(1, 0), &[]).unwrap();
-        let result = stage.replay_block(&make_block(1, 0), &[]);
+        stage.replay_block(&make_block(1, 0), &[], &Hash::zero()).unwrap();
+        let result = stage.replay_block(&make_block(1, 0), &[], &Hash::zero());
         assert!(result.is_err());
     }
 }

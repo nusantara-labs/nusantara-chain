@@ -48,9 +48,9 @@ fn test_epoch_boundary_stake_recalculation() {
         warmup_cooldown_rate_bps: 2500,
     };
 
-    bank.set_stake_delegation(hash(b"s1"), d1);
-    bank.set_stake_delegation(hash(b"s2"), d2);
-    bank.set_stake_delegation(hash(b"s3"), d3);
+    bank.set_stake_delegation(hash(b"s1"), d1).unwrap();
+    bank.set_stake_delegation(hash(b"s2"), d2).unwrap();
+    bank.set_stake_delegation(hash(b"s3"), d3).unwrap();
 
     // Recalculate for epoch 1
     bank.recalculate_epoch_stakes(1);
@@ -154,13 +154,14 @@ fn test_epoch_boundary_partitioned_rewards() {
     )
     .unwrap();
 
-    // Verify rewards are partitioned
-    assert_eq!(rewards.partitions.len(), 4096);
+    // Verify rewards are partitioned — HashMap only contains non-empty partitions.
+    assert!(rewards.partitions.len() <= 4096);
+    assert!(!rewards.partitions.is_empty());
 
     // Verify total distributed rewards
     let total_in_partitions: u64 = rewards
         .partitions
-        .iter()
+        .values()
         .flat_map(|p| p.iter())
         .map(|e| e.lamports + e.commission_lamports)
         .sum();
@@ -168,7 +169,7 @@ fn test_epoch_boundary_partitioned_rewards() {
     assert!(rewards.total_rewards_lamports > 0);
 
     // Verify commission splits
-    for entry in rewards.partitions.iter().flat_map(|p| p.iter()) {
+    for entry in rewards.partitions.values().flat_map(|p| p.iter()) {
         // After commission, staker should receive less than the full reward
         assert!(entry.lamports > 0);
     }
@@ -177,7 +178,7 @@ fn test_epoch_boundary_partitioned_rewards() {
     let mut status = nusantara_consensus::rewards::RewardDistributionStatus::new(1, &rewards);
     assert!(!status.is_complete());
 
-    for partition in &rewards.partitions {
+    for partition in rewards.partitions.values() {
         let partition_total: u64 = partition
             .iter()
             .map(|e| e.lamports + e.commission_lamports)

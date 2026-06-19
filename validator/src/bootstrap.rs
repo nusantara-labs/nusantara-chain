@@ -196,7 +196,9 @@ impl ValidatorNode {
                     warmup_cooldown_rate_bps:
                         nusantara_stake_program::DEFAULT_WARMUP_COOLDOWN_RATE_BPS,
                 };
-                bank.set_stake_delegation(v.stake_account, delegation);
+                if let Err(e) = bank.set_stake_delegation(v.stake_account, delegation) {
+                    tracing::warn!(error = %e, stake_account = ?v.stake_account, "skipping invalid genesis delegation");
+                }
             }
 
             info!(

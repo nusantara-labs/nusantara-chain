@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use nusantara_core::block::Block;
@@ -47,9 +47,15 @@ pub struct ReplayStage {
     pub(crate) gpu_verifier: Option<GpuPohVerifier>,
     pub(crate) current_tip: u64,
     /// Gossip votes for slots not yet in the fork tree. Drained when the
-    /// slot is added via `replay_block`. Each entry maps a slot to a list
-    /// of `(block_hash, stake)` tuples.
-    pub(crate) pending_votes: HashMap<u64, Vec<(Hash, u64)>>,
+    /// slot is added via `replay_block`. BTreeMap keeps slots sorted so oldest
+    /// entries can be evicted via pop_first() in O(log N) (B14).
+    /// Each entry maps a slot to a list of `(voter, block_hash, stake)` tuples.
+    pub(crate) pending_votes: BTreeMap<u64, Vec<(Hash, Hash, u64)>>,
+    /// PoH hash at the end of the last successfully replayed slot.
+    /// Initialized to `Hash::zero()` (valid for the genesis slot).
+    /// Passed as `parent_poh` to `replay_block` so PoH continuity is
+    /// verified across slot boundaries even when `poh_entries` is non-empty.
+    pub(crate) last_poh_hash: Hash,
 }
 
 impl ReplayStage {
@@ -75,7 +81,8 @@ impl ReplayStage {
             leader_schedule_generator: LeaderScheduleGenerator::new(epoch_schedule),
             gpu_verifier,
             current_tip: initial_tip,
-            pending_votes: HashMap::new(),
+            pending_votes: BTreeMap::new(),
+            last_poh_hash: Hash::zero(),
         }
     }
 
@@ -114,8 +121,17 @@ impl ReplayStage {
                 biased;
                 Some((block, poh_entries)) = block_receiver.recv() => {
                     let slot = block.header.slot;
-                    match self.replay_block(&block, &poh_entries) {
+                    // Pass the cached last PoH hash so replay_block can verify
+                    // PoH continuity from the parent slot's terminal hash (F12).
+                    let parent_poh = self.last_poh_hash;
+                    match self.replay_block(&block, &poh_entries, &parent_poh) {
                         Ok(result) => {
+                            // Update last_poh_hash to the terminal PoH hash of this slot.
+                            // If poh_entries is non-empty use the last entry's hash;
+                            // otherwise keep the parent (no PoH advancement on empty slots).
+                            if let Some(last_entry) = poh_entries.last() {
+                                self.last_poh_hash = last_entry.hash;
+                            }
                             // In standalone run() mode, always advance root
                             if let Some(&root) = result.new_root.as_ref()
                                 && let Err(e) = self.advance_root(root)

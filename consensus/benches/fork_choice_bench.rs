@@ -38,10 +38,15 @@ fn fork_tree_add_vote(c: &mut Criterion) {
 
     for depth in [10, 50, 100] {
         let mut tree = build_linear_tree(depth);
+        // Use a counter-derived voter so each iteration introduces a unique voter,
+        // exercising the full insertion path (voters_seen.insert returns true).
+        let mut voter_counter = 0u64;
 
         group.bench_with_input(BenchmarkId::new("depth", depth), &depth, |b, &depth| {
             b.iter(|| {
-                tree.add_vote(depth, 100);
+                let voter = hash(voter_counter.to_le_bytes().as_ref());
+                voter_counter += 1;
+                tree.add_vote(depth, voter, 100);
             });
         });
     }
@@ -71,7 +76,7 @@ fn fork_tree_compute_best(c: &mut Criterion) {
                 )
                 .unwrap();
             }
-            tree.add_vote(base_slot + 9, (fork + 1) * 100);
+            tree.add_vote(base_slot + 9, hash(fork.to_le_bytes().as_ref()), (fork + 1) * 100);
         }
 
         group.bench_with_input(BenchmarkId::new("forks", num_forks), &num_forks, |b, _| {
@@ -90,7 +95,7 @@ fn fork_tree_set_root(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
                 let mut tree = build_linear_tree(size);
-                tree.set_root(size / 2);
+                let _ = tree.set_root(size / 2);
             });
         });
     }

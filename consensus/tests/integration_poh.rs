@@ -12,7 +12,7 @@ fn test_poh_produce_and_verify_full_slot() {
 
     // Collect entries from ticks
     let entries: Vec<_> = ticks.iter().map(|t| t.entry.clone()).collect();
-    assert!(verify_poh_entries(&init, &entries));
+    assert!(verify_poh_entries(&init, &entries).is_ok());
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn test_poh_gpu_matches_cpu() {
     }
 
     // CPU verification
-    assert!(verify_poh_entries(&init, &entries));
+    assert!(verify_poh_entries(&init, &entries).is_ok());
 
     // GPU verification
     let gpu = match GpuPohVerifier::new() {
@@ -82,7 +82,7 @@ fn test_poh_invalid_entry_detected() {
 
     // Tamper with middle entry
     entries[2].hash = hash(b"tampered");
-    assert!(!verify_poh_entries(&init, &entries));
+    assert!(verify_poh_entries(&init, &entries).is_err());
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn test_poh_cross_slot_continuity() {
         all_entries.push(tick.entry.clone());
     }
 
-    assert!(verify_poh_entries(&init, &all_entries));
+    assert!(verify_poh_entries(&init, &all_entries).is_ok());
 
     // Verify continuity: slot 2's first entry is reachable from slot 1's last hash
     let slot1_final_hash = slot1_ticks.last().unwrap().entry.hash;
@@ -137,5 +137,5 @@ fn test_poh_multiple_slots_continuous() {
 
     // All entries should form a valid chain from genesis
     assert_eq!(all_entries.len(), (TICKS_PER_SLOT * 3) as usize);
-    assert!(verify_poh_entries(&init, &all_entries));
+    assert!(verify_poh_entries(&init, &all_entries).is_ok());
 }

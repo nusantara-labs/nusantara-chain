@@ -70,7 +70,12 @@ impl LeaderScheduleGenerator {
             return Err(ConsensusError::NoValidatorsWithStake(epoch));
         }
 
-        let total_stake: u64 = active_stakes.iter().map(|(_, s)| *s).sum();
+        // B4: use checked_add to detect stake overflow.
+        let total_stake: u64 = active_stakes
+            .iter()
+            .try_fold(0u64, |acc, (_, s)| acc.checked_add(*s))
+            .ok_or(ConsensusError::StakeOverflow(epoch))?;
+
         let slots_in_epoch = self.epoch_schedule.slots_per_epoch;
 
         // Number of leader assignments (each gets NUM_CONSECUTIVE_LEADER_SLOTS)
@@ -85,45 +90,10 @@ impl LeaderScheduleGenerator {
         for assignment in 0..num_assignments {
             // Generate a deterministic random value for this assignment
             rng_state = hashv(&[rng_state.as_bytes(), &assignment.to_le_bytes()]);
-            let rng_bytes = rng_state.as_bytes();
-            let mut rng_val = u64::from_le_bytes([
-                rng_bytes[0],
-                rng_bytes[1],
-                rng_bytes[2],
-                rng_bytes[3],
-                rng_bytes[4],
-                rng_bytes[5],
-                rng_bytes[6],
-                rng_bytes[7],
-            ]);
-
-            // Rejection sampling to eliminate modulo bias
-            let max_unbiased = (u64::MAX / total_stake) * total_stake;
-            while rng_val >= max_unbiased {
-                rng_state = hashv(&[rng_state.as_bytes(), &rng_val.to_le_bytes()]);
-                let bytes = rng_state.as_bytes();
-                rng_val = u64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                ]);
-            }
-
-            // Stake-weighted selection
-            let target = rng_val % total_stake;
-            let mut cumulative = 0u64;
-            let mut selected = &active_stakes[0].0;
-
-            for (validator, stake) in &active_stakes {
-                cumulative += stake;
-                if cumulative > target {
-                    selected = validator;
-                    break;
-                }
-            }
-
-            // Assign consecutive slots
+            // B18: extracted into pick_validator helper.
+            let selected = Self::pick_validator(&mut rng_state, &active_stakes, total_stake);
             for _ in 0..NUM_CONSECUTIVE_LEADER_SLOTS {
-                slot_leaders.push(*selected);
+                slot_leaders.push(selected);
             }
         }
 
@@ -131,40 +101,10 @@ impl LeaderScheduleGenerator {
         let remainder = slots_in_epoch - (num_assignments * NUM_CONSECUTIVE_LEADER_SLOTS);
         if remainder > 0 {
             rng_state = hashv(&[rng_state.as_bytes(), &num_assignments.to_le_bytes()]);
-            let rng_bytes = rng_state.as_bytes();
-            let mut rng_val = u64::from_le_bytes([
-                rng_bytes[0],
-                rng_bytes[1],
-                rng_bytes[2],
-                rng_bytes[3],
-                rng_bytes[4],
-                rng_bytes[5],
-                rng_bytes[6],
-                rng_bytes[7],
-            ]);
-
-            // Rejection sampling to eliminate modulo bias
-            let max_unbiased = (u64::MAX / total_stake) * total_stake;
-            while rng_val >= max_unbiased {
-                rng_state = hashv(&[rng_state.as_bytes(), &rng_val.to_le_bytes()]);
-                let bytes = rng_state.as_bytes();
-                rng_val = u64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                ]);
-            }
-            let target = rng_val % total_stake;
-            let mut cumulative = 0u64;
-            let mut selected = &active_stakes[0].0;
-            for (validator, stake) in &active_stakes {
-                cumulative += stake;
-                if cumulative > target {
-                    selected = validator;
-                    break;
-                }
-            }
+            // B18: reuse pick_validator helper.
+            let selected = Self::pick_validator(&mut rng_state, &active_stakes, total_stake);
             for _ in 0..remainder {
-                slot_leaders.push(*selected);
+                slot_leaders.push(selected);
             }
         }
 
@@ -174,6 +114,48 @@ impl LeaderScheduleGenerator {
             epoch,
             slot_leaders,
         })
+    }
+
+    /// B18: Deterministic stake-weighted validator selection with rejection sampling.
+    ///
+    /// Advances `rng_state` in-place. `total_stake` must be > 0 (guaranteed by caller).
+    /// Uses u128 for `cumulative` to avoid overflow when summing large stakes (B4).
+    fn pick_validator(
+        rng_state: &mut Hash,
+        active_stakes: &[(Hash, u64)],
+        total_stake: u64,
+    ) -> Hash {
+        let mut rng_bytes = rng_state.as_bytes();
+        let mut rng_val = u64::from_le_bytes([
+            rng_bytes[0], rng_bytes[1], rng_bytes[2], rng_bytes[3],
+            rng_bytes[4], rng_bytes[5], rng_bytes[6], rng_bytes[7],
+        ]);
+
+        // Rejection sampling to eliminate modulo bias.
+        let max_unbiased = (u64::MAX / total_stake) * total_stake;
+        while rng_val >= max_unbiased {
+            *rng_state = hashv(&[rng_state.as_bytes(), &rng_val.to_le_bytes()]);
+            rng_bytes = rng_state.as_bytes();
+            rng_val = u64::from_le_bytes([
+                rng_bytes[0], rng_bytes[1], rng_bytes[2], rng_bytes[3],
+                rng_bytes[4], rng_bytes[5], rng_bytes[6], rng_bytes[7],
+            ]);
+        }
+
+        // Stake-weighted selection; use u128 for cumulative to avoid overflow (B4).
+        let target = rng_val % total_stake;
+        let mut cumulative: u128 = 0;
+        let mut selected = active_stakes[0].0;
+
+        for (validator, stake) in active_stakes {
+            cumulative += *stake as u128;
+            if cumulative > target as u128 {
+                selected = *validator;
+                break;
+            }
+        }
+
+        selected
     }
 }
 

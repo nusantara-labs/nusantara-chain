@@ -62,4 +62,20 @@ pub enum ConsensusError {
     Gpu(String),
     #[error("GPU not available")]
     GpuNotAvailable,
+
+    // Fork choice errors (extended)
+    #[error("invalid root slot {0}: not present in fork tree")]
+    InvalidRoot(u64),
+
+    // Leader schedule errors (extended)
+    #[error("stake overflow while computing total stake for epoch {0}")]
+    StakeOverflow(u64),
+
+    // Bank errors (extended)
+    #[error("invalid delegation: {0}")]
+    InvalidDelegation(String),
+
+    // Tower errors (extended)
+    #[error("vote has empty slots list")]
+    EmptyVoteSlots,
 }

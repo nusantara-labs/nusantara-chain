@@ -8,9 +8,30 @@ use tracing::instrument;
 use crate::bank::ConsensusBank;
 
 impl ConsensusBank {
-    /// Register a stake delegation.
-    pub fn set_stake_delegation(&self, stake_account: Hash, delegation: Delegation) {
+    /// Register a stake delegation after validating invariants (B8).
+    ///
+    /// Returns `Err(InvalidDelegation)` if:
+    /// - `activation_epoch > deactivation_epoch` (would be immediately inactive)
+    /// - `warmup_cooldown_rate_bps > 10_000` (rate > 100% is nonsensical)
+    pub fn set_stake_delegation(
+        &self,
+        stake_account: Hash,
+        delegation: Delegation,
+    ) -> Result<(), crate::error::ConsensusError> {
+        if delegation.activation_epoch > delegation.deactivation_epoch {
+            return Err(crate::error::ConsensusError::InvalidDelegation(format!(
+                "activation_epoch ({}) > deactivation_epoch ({})",
+                delegation.activation_epoch, delegation.deactivation_epoch
+            )));
+        }
+        if delegation.warmup_cooldown_rate_bps > 10_000 {
+            return Err(crate::error::ConsensusError::InvalidDelegation(format!(
+                "warmup_cooldown_rate_bps ({}) exceeds 10_000 (100%)",
+                delegation.warmup_cooldown_rate_bps
+            )));
+        }
         self.stake_delegations.insert(stake_account, delegation);
+        Ok(())
     }
 
     /// Get validator effective stake.
@@ -143,7 +164,8 @@ mod tests {
                 deactivation_epoch: u64::MAX,
                 warmup_cooldown_rate_bps: 10_000, // 100% warmup
             },
-        );
+        )
+        .unwrap();
 
         // Epoch 1 = activation epoch → warmup path with large stake * 10_000 / 10_000
         // Without u128 intermediate this would overflow
@@ -168,11 +190,45 @@ mod tests {
                     deactivation_epoch: u64::MAX,
                     warmup_cooldown_rate_bps: 2500,
                 },
-            );
+            )
+            .unwrap();
         }
 
         bank.recalculate_epoch_stakes(1);
         assert_eq!(bank.get_validator_stake(&voter), 5_000_000);
         assert_eq!(bank.total_active_stake(), 5_000_000);
+    }
+
+    #[test]
+    fn invalid_delegation_rejected() {
+        let (bank, _storage, _dir) = temp_bank();
+        let voter = nusantara_crypto::hash(b"voter");
+        let acc = nusantara_crypto::hash(b"stake");
+
+        // activation_epoch > deactivation_epoch
+        let result = bank.set_stake_delegation(
+            acc,
+            nusantara_stake_program::Delegation {
+                voter_pubkey: voter,
+                stake: 1_000,
+                activation_epoch: 10,
+                deactivation_epoch: 5,
+                warmup_cooldown_rate_bps: 2500,
+            },
+        );
+        assert!(result.is_err());
+
+        // warmup_cooldown_rate_bps > 10_000
+        let result = bank.set_stake_delegation(
+            acc,
+            nusantara_stake_program::Delegation {
+                voter_pubkey: voter,
+                stake: 1_000,
+                activation_epoch: 0,
+                deactivation_epoch: u64::MAX,
+                warmup_cooldown_rate_bps: 10_001,
+            },
+        );
+        assert!(result.is_err());
     }
 }

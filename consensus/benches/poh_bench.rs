@@ -54,7 +54,7 @@ fn poh_verify_entries(c: &mut Criterion) {
             &entries,
             |b, entries| {
                 b.iter(|| {
-                    verify_poh_entries(&init, entries);
+                    let _ = verify_poh_entries(&init, entries);
                 });
             },
         );

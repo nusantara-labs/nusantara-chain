@@ -61,7 +61,7 @@ fn tower_switch_threshold(c: &mut Criterion) {
 
     c.bench_function("tower_switch_threshold_1000_validators", |b| {
         b.iter(|| {
-            tower.check_switch_threshold(100, &stakes, 1_000_000);
+            tower.check_switch_threshold(&stakes, 1_000_000);
         });
     });
 }

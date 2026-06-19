@@ -415,8 +415,11 @@ impl ValidatorNode {
             }
         }
 
-        // 6. Feed into ReplayStage for fork tree tracking
-        let result = self.replay_stage.replay_block(&block, &[])?;
+        // 6. Feed into ReplayStage for fork tree tracking.
+        //    poh_entries is empty for leader-produced blocks (PoH is trusted locally),
+        //    so parent_poh is not read by replay_block — Hash::zero() is safe here
+        //    and avoids a storage read on the hot leader path.
+        let result = self.replay_stage.replay_block(&block, &[], &Hash::zero())?;
         self.replay_tip_shared.store(self.current_slot, Ordering::Relaxed);
 
         // Defer root advancement (leader is never catching up for its own blocks)
@@ -437,7 +440,7 @@ impl ValidatorNode {
         }
         if let Err(e) = self.pubsub_tx.send(PubsubEvent::BlockNotification {
             slot: self.current_slot,
-            block_hash: block.header.block_hash.to_base64(),
+            block_hash: block.header.block_hash.to_base58(),
             tx_count: block.header.transaction_count,
         }) {
             tracing::debug!(error = %e, "pubsub BlockNotification send failed (no subscribers)");
@@ -445,9 +448,9 @@ impl ValidatorNode {
 
         // Publish SignatureNotification using inline tx_statuses (no RocksDB reads)
         for (tx_hash, status_str) in &exec_result.tx_statuses {
-            let sig_b64 = tx_hash.to_base64();
+            let sig_b58 = tx_hash.to_base58();
             let _ = self.pubsub_tx.send(PubsubEvent::SignatureNotification {
-                signature: sig_b64,
+                signature: sig_b58,
                 slot: self.current_slot,
                 status: status_str.clone(),
             });

@@ -15,7 +15,8 @@ impl ReplayStage {
             tracing::debug!(root, "skipping root advancement — slot not in fork tree");
             return Ok(());
         }
-        let pruned = self.fork_tree.set_root(root);
+        // B2: set_root now returns Result; propagate InvalidRoot errors.
+        let pruned = self.fork_tree.set_root(root)?;
         self.commitment_tracker.prune_below(root);
         self.bank.set_root(root)?;
         tracing::info!(root, pruned_count = pruned.len(), "Root advanced");
@@ -46,13 +47,12 @@ impl ReplayStage {
 
         // Check Tower lockout allows switching
         if self.tower.check_vote_lockout(best).is_err() {
-            // Check switch threshold (38%) — need enough stake on alternative fork
+            // Check switch threshold (38%) — need enough stake on alternative fork.
+            // B26: check_switch_threshold now takes (stakes_slice, total) — no switch_slot.
             let alt_stake = self.fork_tree.get_node(best)?.subtree_stake;
             let total = self.fork_tree.total_active_stake();
-            if total == 0
-                || ((alt_stake as u128 * 100 / total as u128) as u64)
-                    < crate::tower::SWITCH_THRESHOLD_PERCENTAGE
-            {
+            let alt_stakes = [(nusantara_crypto::Hash::zero(), alt_stake)];
+            if !self.tower.check_switch_threshold(&alt_stakes, total) {
                 return None;
             }
         }

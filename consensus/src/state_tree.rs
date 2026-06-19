@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nusantara_core::Account;
 use nusantara_crypto::{Hash, Hasher, hashv};
@@ -66,6 +66,11 @@ pub struct StateTree {
     /// changed. Only valid when `!structural_change`. Sorted descending during
     /// flush so that children are recomputed before their parents.
     dirty: HashSet<usize>,
+    /// Maps each leaf address to its sorted position in the BTreeMap.
+    /// Updated on full_rebuild(); used to avoid O(N) `keys().position()` scans
+    /// in `update()` (in-place path) and `proof()`. Stale after structural changes
+    /// until the next full_rebuild().
+    leaf_indices: HashMap<Hash, usize>,
 }
 
 /// Hash a leaf node with a domain separator to avoid second-preimage attacks.
@@ -119,6 +124,7 @@ impl StateTree {
             capacity: 0,
             structural_change: false,
             dirty: HashSet::new(),
+            leaf_indices: HashMap::new(),
         }
     }
 
@@ -150,14 +156,11 @@ impl StateTree {
                 self.leaves.insert(*address, leaf_hash);
 
                 if !self.structural_change && !self.nodes.is_empty() {
-                    // Find the sorted position of this address among all leaves.
-                    // BTreeMap iteration order is sorted, so position() gives the
-                    // correct leaf index.
-                    let leaf_index = self
-                        .leaves
-                        .keys()
-                        .position(|k| k == address)
-                        .expect("key was just confirmed present");
+                    // O(1) lookup via leaf_indices (maintained by full_rebuild).
+                    let leaf_index = *self
+                        .leaf_indices
+                        .get(address)
+                        .expect("leaf_indices invariant: address in leaves must be in index");
                     let node_idx = self.capacity - 1 + leaf_index;
                     self.nodes[node_idx] = hash_leaf(&leaf_hash);
                     self.mark_ancestors_dirty(node_idx);
@@ -210,14 +213,13 @@ impl StateTree {
             return None;
         }
 
-        // Find the leaf index in sorted order before rebuilding (position is
-        // stable across rebuild since BTreeMap order doesn't change).
-        let leaf_index = self.leaves.keys().position(|k| k == address)?;
-        let total_leaves = self.leaves.len();
-
-        // Make sure the node array is current.
+        // Ensure the node array (and leaf_indices) are current before looking up.
         self.ensure_rebuilt();
         self.flush_dirty();
+
+        // O(1) lookup via leaf_indices (populated by full_rebuild).
+        let leaf_index = *self.leaf_indices.get(address)?;
+        let total_leaves = self.leaves.len();
 
         // Walk from leaf to root collecting siblings.
         let mut pos = self.capacity - 1 + leaf_index;
@@ -288,6 +290,7 @@ impl StateTree {
             capacity: 0,
             structural_change: true,
             dirty: HashSet::new(),
+            leaf_indices: HashMap::new(),
         };
 
         // Pre-build the node array so the first slot after boot can use
@@ -381,6 +384,13 @@ impl StateTree {
             let left = self.nodes[2 * i + 1];
             let right = self.nodes[2 * i + 2];
             self.nodes[i] = hash_internal(&left, &right);
+        }
+
+        // Rebuild leaf_indices: address -> sorted position in BTreeMap.
+        // BTreeMap iteration is always sorted, so enumerate() gives the correct index.
+        self.leaf_indices.clear();
+        for (i, k) in self.leaves.keys().enumerate() {
+            self.leaf_indices.insert(*k, i);
         }
     }
 }
@@ -830,6 +840,57 @@ mod tests {
         let reference = compute_root(&leaf_hashes);
 
         assert_eq!(root, reference);
+    }
+
+    /// F3 regression: after large incremental updates, every address in `leaves`
+    /// must appear in `leaf_indices` with its correct sorted position.
+    #[test]
+    fn leaf_indices_invariant_after_incremental_updates() {
+        let count = 200usize;
+        let mut deltas: Vec<(Hash, Account)> = (0..count)
+            .map(|i| (hash(&(i as u64).to_le_bytes()), make_account(i as u64 * 10)))
+            .collect();
+
+        let mut tree = StateTree::new();
+        tree.update(&deltas);
+        let _ = tree.root(); // triggers full_rebuild -> populates leaf_indices
+
+        // Update 50 existing accounts (no structural change).
+        let updates: Vec<(Hash, Account)> = (0..50)
+            .map(|i| (deltas[i * 4].0, make_account(999 + i as u64)))
+            .collect();
+        tree.update(&updates);
+        let _ = tree.root(); // flush dirty; leaf_indices unchanged (no structural change)
+
+        // Verify invariant: every key in `leaves` is in `leaf_indices` at the correct position.
+        let sorted_keys: Vec<Hash> = tree.leaves.keys().copied().collect();
+        for (expected_idx, addr) in sorted_keys.iter().enumerate() {
+            let got_idx = *tree
+                .leaf_indices
+                .get(addr)
+                .expect("every address in leaves must be in leaf_indices");
+            assert_eq!(
+                got_idx, expected_idx,
+                "leaf_indices[addr] should be {expected_idx}, got {got_idx}"
+            );
+        }
+        assert_eq!(tree.leaf_indices.len(), tree.leaves.len());
+
+        // Add a new account (structural change -> rebuild) and re-verify.
+        let new_addr = hash(b"brand_new_address_xyz");
+        deltas.push((new_addr, make_account(42)));
+        tree.update(&[(new_addr, make_account(42))]);
+        let _ = tree.root();
+
+        let sorted_keys: Vec<Hash> = tree.leaves.keys().copied().collect();
+        for (expected_idx, addr) in sorted_keys.iter().enumerate() {
+            let got_idx = *tree
+                .leaf_indices
+                .get(addr)
+                .expect("every address in leaves must be in leaf_indices after rebuild");
+            assert_eq!(got_idx, expected_idx);
+        }
+        assert_eq!(tree.leaf_indices.len(), tree.leaves.len());
     }
 
     /// Multiple incremental updates in sequence without structural changes.

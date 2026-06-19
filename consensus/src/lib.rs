@@ -24,12 +24,11 @@ mod test_utils;
 pub mod tower;
 
 pub use bank::{ConsensusBank, FrozenBankState};
-pub use commitment::{
-    CommitmentTracker, MAX_TRACKED_SLOTS, OPTIMISTIC_CONFIRMATION_THRESHOLD,
-    SUPERMAJORITY_THRESHOLD, SlotCommitment,
-};
+pub use commitment::{CommitmentTracker, MAX_TRACKED_SLOTS, SlotCommitment, SUPERMAJORITY_THRESHOLD};
 pub use error::ConsensusError;
-pub use fork_choice::{DUPLICATE_THRESHOLD_PERCENTAGE, ForkNode, ForkTree, MAX_UNCONFIRMED_DEPTH};
+pub use fork_choice::{
+    DUPLICATE_THRESHOLD_PERCENTAGE, ForkNode, ForkTree, MAX_FORK_TREE_NODES, MAX_UNCONFIRMED_DEPTH,
+};
 pub use gpu::GpuPohVerifier;
 pub use leader_schedule::{LeaderSchedule, LeaderScheduleGenerator, NUM_CONSECUTIVE_LEADER_SLOTS};
 pub use poh::{

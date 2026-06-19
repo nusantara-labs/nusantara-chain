@@ -53,7 +53,8 @@ mod tests {
                 deactivation_epoch: u64::MAX,
                 warmup_cooldown_rate_bps: 2500,
             },
-        );
+        )
+        .unwrap();
 
         // Without slash: full stake
         bank.recalculate_epoch_stakes(1);
@@ -93,7 +94,8 @@ mod tests {
                 deactivation_epoch: u64::MAX,
                 warmup_cooldown_rate_bps: 2500,
             },
-        );
+        )
+        .unwrap();
 
         // Slash more than the stake
         bank.apply_slash(&voter, 999_999_999);

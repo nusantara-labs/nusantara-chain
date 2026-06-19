@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 
 use nusantara_core::commitment::CommitmentLevel;
 use nusantara_core::native_token::const_parse_u64;
@@ -7,8 +7,6 @@ use tracing::instrument;
 
 use crate::error::ConsensusError;
 
-pub const OPTIMISTIC_CONFIRMATION_THRESHOLD: u64 =
-    const_parse_u64(env!("NUSA_COMMITMENT_OPTIMISTIC_CONFIRMATION_THRESHOLD"));
 pub const SUPERMAJORITY_THRESHOLD: u64 =
     const_parse_u64(env!("NUSA_COMMITMENT_SUPERMAJORITY_THRESHOLD"));
 /// Maximum number of slots tracked in the commitment tracker.
@@ -21,10 +19,13 @@ pub struct SlotCommitment {
     pub block_hash: Hash,
     pub total_stake_voted: u64,
     pub commitment: CommitmentLevel,
+    /// Tracks which voters have already been counted to prevent vote stuffing.
+    pub voters_seen: HashSet<Hash>,
 }
 
 pub struct CommitmentTracker {
-    slots: HashMap<u64, SlotCommitment>,
+    /// BTreeMap for O(log N) insertion and O(1) oldest-entry eviction via pop_first.
+    slots: BTreeMap<u64, SlotCommitment>,
     total_active_stake: u64,
     highest_confirmed: u64,
     highest_finalized: u64,
@@ -33,7 +34,7 @@ pub struct CommitmentTracker {
 impl CommitmentTracker {
     pub fn new(total_active_stake: u64) -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             total_active_stake,
             highest_confirmed: 0,
             highest_finalized: 0,
@@ -45,7 +46,7 @@ impl CommitmentTracker {
     }
 
     /// Begin tracking a slot at Processed level.
-    /// Prunes oldest entries when capacity exceeds `MAX_TRACKED_SLOTS`.
+    /// Prunes oldest entries (lowest slot numbers) when capacity exceeds `MAX_TRACKED_SLOTS`.
     #[instrument(skip(self), level = "debug")]
     pub fn track_slot(&mut self, slot: u64, block_hash: Hash) {
         self.slots.entry(slot).or_insert(SlotCommitment {
@@ -53,32 +54,41 @@ impl CommitmentTracker {
             block_hash,
             total_stake_voted: 0,
             commitment: CommitmentLevel::Processed,
+            voters_seen: HashSet::new(),
         });
 
-        // Prune oldest entries when capacity exceeded
-        if self.slots.len() > MAX_TRACKED_SLOTS {
-            let mut slot_keys: Vec<u64> = self.slots.keys().copied().collect();
-            slot_keys.sort_unstable();
-            let to_remove = self.slots.len() - MAX_TRACKED_SLOTS;
-            for &s in &slot_keys[..to_remove] {
-                self.slots.remove(&s);
-            }
+        // BTreeMap keeps keys sorted; pop_first() evicts the oldest slot in O(log N).
+        while self.slots.len() > MAX_TRACKED_SLOTS {
+            self.slots.pop_first();
         }
     }
 
-    /// Record a vote for a slot, returning the new commitment level.
+    /// Record a vote for a slot from a specific voter, returning the new commitment level.
+    /// Deduplicates per-voter stake to prevent vote stuffing (B1).
     #[instrument(skip(self), level = "debug")]
-    pub fn record_vote(&mut self, slot: u64, block_hash: Hash, stake: u64) -> CommitmentLevel {
+    pub fn record_vote(
+        &mut self,
+        slot: u64,
+        block_hash: Hash,
+        voter: Hash,
+        stake: u64,
+    ) -> CommitmentLevel {
         let entry = self.slots.entry(slot).or_insert(SlotCommitment {
             slot,
             block_hash,
             total_stake_voted: 0,
             commitment: CommitmentLevel::Processed,
+            voters_seen: HashSet::new(),
         });
 
         // Reject votes for a different block at the same slot — prevents
         // stake inflation from conflicting blocks.
         if entry.block_hash != block_hash {
+            return entry.commitment;
+        }
+
+        // B1: per-voter dedup — skip if this voter already counted at this slot.
+        if !entry.voters_seen.insert(voter) {
             return entry.commitment;
         }
 
@@ -136,7 +146,9 @@ impl CommitmentTracker {
     /// Prune entries below the given slot.
     #[instrument(skip(self), level = "debug")]
     pub fn prune_below(&mut self, slot: u64) {
-        self.slots.retain(|&s, _| s >= slot);
+        // BTreeMap::split_off returns the portion >= slot; drop the old portion.
+        let remaining = self.slots.split_off(&slot);
+        self.slots = remaining;
     }
 }
 
@@ -146,7 +158,6 @@ mod tests {
 
     #[test]
     fn config_values() {
-        assert_eq!(OPTIMISTIC_CONFIRMATION_THRESHOLD, 66);
         assert_eq!(SUPERMAJORITY_THRESHOLD, 66);
     }
 
@@ -155,28 +166,54 @@ mod tests {
         let total_stake = 1000;
         let mut tracker = CommitmentTracker::new(total_stake);
         let block_hash = nusantara_crypto::hash(b"block1");
+        let voter1 = nusantara_crypto::hash(b"voter1");
+        let voter2 = nusantara_crypto::hash(b"voter2");
 
         tracker.track_slot(1, block_hash);
         let level = tracker.get_commitment(1).unwrap();
         assert_eq!(level, CommitmentLevel::Processed);
 
         // Vote with 50% stake -> still Processed
-        let level = tracker.record_vote(1, block_hash, 500);
+        let level = tracker.record_vote(1, block_hash, voter1, 500);
         assert_eq!(level, CommitmentLevel::Processed);
 
-        // Vote with 17% more -> 67% -> Confirmed
-        let level = tracker.record_vote(1, block_hash, 170);
+        // Same voter again -> deduped, stake unchanged, still Processed
+        let level = tracker.record_vote(1, block_hash, voter1, 500);
+        assert_eq!(level, CommitmentLevel::Processed);
+
+        // Different voter with 17% more -> 67% -> Confirmed
+        let level = tracker.record_vote(1, block_hash, voter2, 170);
         assert_eq!(level, CommitmentLevel::Confirmed);
         assert_eq!(tracker.highest_confirmed(), 1);
+    }
+
+    #[test]
+    fn vote_dedup_same_voter() {
+        let mut tracker = CommitmentTracker::new(1000);
+        let block_hash = nusantara_crypto::hash(b"block");
+        let voter = nusantara_crypto::hash(b"voter");
+
+        tracker.track_slot(10, block_hash);
+        tracker.record_vote(10, block_hash, voter, 900);
+        // Second call from same voter must not add stake again
+        let level = tracker.record_vote(10, block_hash, voter, 900);
+        // 90% from first vote should have confirmed it
+        assert_eq!(level, CommitmentLevel::Confirmed);
+        // total_stake_voted must still be 900, not 1800
+        assert_eq!(
+            tracker.get_slot_commitment(10).unwrap().total_stake_voted,
+            900
+        );
     }
 
     #[test]
     fn finalize_slot() {
         let mut tracker = CommitmentTracker::new(1000);
         let block_hash = nusantara_crypto::hash(b"block");
+        let voter = nusantara_crypto::hash(b"voter");
 
         tracker.track_slot(5, block_hash);
-        tracker.record_vote(5, block_hash, 700);
+        tracker.record_vote(5, block_hash, voter, 700);
         tracker.mark_finalized(5);
 
         assert_eq!(
@@ -214,7 +251,8 @@ mod tests {
         tracker.track_slot(1, h);
         // Vote with 70% of total_stake — use u128 to compute the value without overflow
         let vote_stake = (total_stake as u128 * 70 / 100) as u64;
-        let level = tracker.record_vote(1, h, vote_stake);
+        let voter = nusantara_crypto::hash(b"voter");
+        let level = tracker.record_vote(1, h, voter, vote_stake);
         // 70% >= 66% threshold -> Confirmed
         assert_eq!(level, CommitmentLevel::Confirmed);
     }
