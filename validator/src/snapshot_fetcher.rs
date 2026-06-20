@@ -135,7 +135,10 @@ pub async fn fetch_snapshot_from_entrypoints(
             ValidatorError::NetworkInit(format!("failed to read snapshot chunk: {e}"))
         })?;
         hasher.update(&chunk);
-        tmp_file.write_all(&chunk).await.map_err(ValidatorError::Io)?;
+        tmp_file
+            .write_all(&chunk)
+            .await
+            .map_err(ValidatorError::Io)?;
         total_bytes += chunk.len() as u64;
     }
     tmp_file.flush().await.map_err(ValidatorError::Io)?;
@@ -233,9 +236,6 @@ mod tests {
 
     #[test]
     fn entrypoint_url_ipv6() {
-        assert_eq!(
-            entrypoint_to_rpc_url("[::1]:8000"),
-            "http://[::1]:8899"
-        );
+        assert_eq!(entrypoint_to_rpc_url("[::1]:8000"), "http://[::1]:8899");
     }
 }

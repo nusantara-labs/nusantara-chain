@@ -64,12 +64,10 @@ impl ValidatorNode {
         let (votes, new_cursor) = self.cluster_info.get_votes_since(self.gossip_vote_cursor);
         for vote in &votes {
             // Check for equivocation before processing the vote normally
-            if let Some(proof) = self.slash_detector.check_vote(
-                &vote.from,
-                vote.slot,
-                &vote.hash,
-                &self.identity,
-            ) {
+            if let Some(proof) =
+                self.slash_detector
+                    .check_vote(&vote.from, vote.slot, &vote.hash, &self.identity)
+            {
                 // Persist slash proof to storage
                 if let Err(e) = self.storage.put_slash_proof(&proof) {
                     warn!(error = %e, "failed to store slash proof");
@@ -77,8 +75,7 @@ impl ValidatorNode {
 
                 // Calculate penalty: 5% of validator's current effective stake
                 let validator_stake = self.bank.get_validator_stake(&proof.validator);
-                let penalty =
-                    validator_stake * nusantara_consensus::SLASH_PENALTY_BPS / 10_000;
+                let penalty = validator_stake * nusantara_consensus::SLASH_PENALTY_BPS / 10_000;
                 if penalty > 0 {
                     self.bank.apply_slash(&proof.validator, penalty);
                     info!(

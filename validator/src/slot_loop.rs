@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nusantara_core::block::Block;
 use nusantara_core::DEFAULT_SLOT_DURATION_MS;
+use nusantara_core::block::Block;
 use nusantara_crypto::Hash;
 use nusantara_rpc::PubsubEvent;
 use nusantara_storage::StorageWriteBatch;
@@ -18,8 +18,8 @@ use tracing::{info, warn};
 
 use crate::cli::Cli;
 use crate::constants::{CATCHUP_THRESHOLD, GOSSIP_REPORT_INTERVAL, LEDGER_PRUNE_INTERVAL};
-use crate::helpers;
 use crate::error::ValidatorError;
+use crate::helpers;
 use crate::node::ValidatorNode;
 
 impl ValidatorNode {
@@ -238,7 +238,10 @@ impl ValidatorNode {
         }
         if !pending.is_empty() {
             pending.sort_by_key(|b| b.header.slot);
-            info!(count = pending.len(), "catching up on pending blocks before leader slot");
+            info!(
+                count = pending.len(),
+                "catching up on pending blocks before leader slot"
+            );
             for block in pending {
                 self.replay_or_buffer_block(block)?;
             }
@@ -258,12 +261,7 @@ impl ValidatorNode {
                 wait_ms,
                 "waiting for previous slot's block before producing"
             );
-            match tokio::time::timeout(
-                Duration::from_millis(wait_ms),
-                block_rx.recv(),
-            )
-            .await
-            {
+            match tokio::time::timeout(Duration::from_millis(wait_ms), block_rx.recv()).await {
                 Ok(Some(block)) => {
                     self.replay_or_buffer_block(block)?;
                     // Drain any additional blocks that arrived
@@ -285,7 +283,10 @@ impl ValidatorNode {
 
         // 3. Skip production if this slot was already processed
         if self.replay_stage.fork_tree().contains(self.current_slot) {
-            info!(slot = self.current_slot, "slot already in fork tree, skipping production");
+            info!(
+                slot = self.current_slot,
+                "slot already in fork tree, skipping production"
+            );
             return Ok(());
         }
 
@@ -323,8 +324,7 @@ impl ValidatorNode {
                         .map(|n| (s, n.block_hash))
                 })
                 .collect();
-            let merged =
-                helpers::build_merged_slot_hashes(&fork_slot_hashes, &self.storage, 512);
+            let merged = helpers::build_merged_slot_hashes(&fork_slot_hashes, &self.storage, 512);
             self.bank.set_slot_hashes(SlotHashes(merged));
 
             let ancestor_set: HashSet<u64> = ancestry.iter().copied().collect();
@@ -420,7 +420,8 @@ impl ValidatorNode {
         //    so parent_poh is not read by replay_block — Hash::zero() is safe here
         //    and avoids a storage read on the hot leader path.
         let result = self.replay_stage.replay_block(&block, &[], &Hash::zero())?;
-        self.replay_tip_shared.store(self.current_slot, Ordering::Relaxed);
+        self.replay_tip_shared
+            .store(self.current_slot, Ordering::Relaxed);
 
         // Defer root advancement (leader is never catching up for its own blocks)
         if let Some(root) = result.new_root {
@@ -465,17 +466,12 @@ impl ValidatorNode {
             let current_slot = self.current_slot;
             let broadcast = broadcast.clone();
             tokio::spawn(async move {
-                let mut peers: Vec<Hash> = ci
-                    .all_peers()
-                    .iter()
-                    .map(|ci| ci.identity)
-                    .collect();
+                let mut peers: Vec<Hash> = ci.all_peers().iter().map(|ci| ci.identity()).collect();
                 if !peers.contains(&identity) {
                     peers.push(identity);
                 }
                 let stakes_vec = bank.get_stake_distribution();
-                let stakes: std::collections::HashMap<Hash, u64> =
-                    stakes_vec.into_iter().collect();
+                let stakes: std::collections::HashMap<Hash, u64> = stakes_vec.into_iter().collect();
                 let tree = TurbineTree::new(
                     identity,
                     &peers,
@@ -578,7 +574,8 @@ impl ValidatorNode {
             }
             if !extra.is_empty() {
                 extra.sort_by_key(|b| b.header.slot);
-                metrics::counter!("nusantara_catchup_blocks_replayed").increment(extra.len() as u64);
+                metrics::counter!("nusantara_catchup_blocks_replayed")
+                    .increment(extra.len() as u64);
                 for block in extra {
                     self.replay_or_buffer_block(block)?;
                 }

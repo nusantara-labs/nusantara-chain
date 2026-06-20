@@ -5,8 +5,6 @@ use std::sync::Arc;
 use nusantara_crypto::{Hash, Keypair, PublicKey, hashv};
 use parking_lot::RwLock;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::contact_info::ContactInfo;
 use crate::crds::CrdsTable;
 use crate::crds_gossip_pull::CrdsGossipPull;
@@ -35,11 +33,8 @@ impl ClusterInfo {
         let my_identity = keypair.address();
         let crds = Arc::new(CrdsTable::new());
 
-        // Insert our own contact info
-        let self_value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(contact_info.clone()),
-            &keypair,
-        );
+        let self_value =
+            CrdsValue::new_signed(CrdsData::ContactInfo(contact_info.clone()), &keypair);
         crds.insert(self_value).expect("self-insert cannot fail");
 
         Self {
@@ -85,22 +80,19 @@ impl ClusterInfo {
         &self.entrypoints
     }
 
-    /// Get all known peers (excluding self).
     pub fn all_peers(&self) -> Vec<ContactInfo> {
         let my_id = self.my_identity();
         self.crds
             .all_contact_infos()
             .into_iter()
-            .filter(|ci| ci.identity != my_id)
+            .filter(|ci| ci.identity() != my_id)
             .collect()
     }
 
-    /// Get contact info for a specific validator.
     pub fn get_contact_info(&self, identity: &Hash) -> Option<ContactInfo> {
         self.crds.get_contact_info(identity)
     }
 
-    /// Look up the public key for a validator identity from CRDS ContactInfo.
     pub fn get_pubkey(&self, identity: &Hash) -> Option<PublicKey> {
         self.crds
             .get_contact_info(identity)
@@ -132,7 +124,6 @@ impl ClusterInfo {
                 }
             }
             None => {
-                // Non-ContactInfo from unknown peer — reject
                 metrics::counter!("nusantara_gossip_unverifiable_value_dropped_total").increment(1);
                 tracing::debug!(
                     origin = ?value.origin(),
@@ -146,44 +137,31 @@ impl ClusterInfo {
         self.crds.insert(value).is_ok()
     }
 
-    /// Insert a CRDS value without verification (for backward compat in tests).
-    pub fn insert_crds_value(&self, value: CrdsValue) -> bool {
-        self.crds.insert(value).is_ok()
-    }
-
-    /// Update our contact info (e.g. new wallclock).
+    /// Update our contact info (M8: lock first, build and insert under the same lock).
     pub fn update_self_contact_info(&self, contact_info: ContactInfo) {
-        let value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(contact_info.clone()),
-            &self.keypair,
-        );
+        let mut ci_guard = self.my_contact_info.write();
+        let value =
+            CrdsValue::new_signed(CrdsData::ContactInfo(contact_info.clone()), &self.keypair);
         let _ = self.crds.insert(value);
-        *self.my_contact_info.write() = contact_info;
+        *ci_guard = contact_info;
     }
 
     /// Refresh our own ContactInfo wallclock so it doesn't get purged.
     pub fn refresh_self_wallclock(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis() as u64;
         let mut ci = self.my_contact_info.write();
-        ci.wallclock = now;
-        let value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(ci.clone()),
-            &self.keypair,
-        );
+        ci.wallclock = now_ms();
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci.clone()), &self.keypair);
         let _ = self.crds.insert(value);
     }
 
     /// Get peers with stakes for push/pull operations.
-    /// Uses HashMap for O(1) stake lookups.
+    /// Unknown peers default to stake 0 (H5) — they are still included in
+    /// push selection but ranked below known stakers.
     pub fn peers_with_stakes(&self, stakes: &HashMap<Hash, u64>) -> Vec<(ContactInfo, u64)> {
-        let peers = self.all_peers();
-        peers
+        self.all_peers()
             .into_iter()
             .map(|ci| {
-                let stake = stakes.get(&ci.identity).copied().unwrap_or(1);
+                let stake = stakes.get(&ci.identity()).copied().unwrap_or(0);
                 (ci, stake)
             })
             .collect()
@@ -193,25 +171,17 @@ impl ClusterInfo {
         self.all_peers().len()
     }
 
-    /// Publish a vote to gossip via CRDS.
     pub fn push_vote(&self, slot: u64, hash: Hash) {
-        let wallclock = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis() as u64;
-
         let vote = CrdsVote {
             from: self.my_identity(),
             slot,
             hash,
-            wallclock,
+            wallclock: now_ms(),
         };
         let value = CrdsValue::new_signed(CrdsData::Vote(vote), &self.keypair);
         let _ = self.crds.insert(value);
     }
 
-    /// Get votes inserted since the given cursor.
-    /// Returns `(votes, new_cursor)`.
     pub fn get_votes_since(&self, cursor: u64) -> (Vec<CrdsVote>, u64) {
         let new_cursor = self.crds.current_cursor();
         let values = self.crds.values_since(cursor);
@@ -228,20 +198,15 @@ impl ClusterInfo {
         (votes, new_cursor)
     }
 
-    /// Create a signed prune message for sending to a peer.
     pub fn create_signed_prune_message(
         &self,
         prunes: Vec<Hash>,
         destination: Hash,
     ) -> PruneMessage {
-        let wallclock = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis() as u64;
-
+        let wallclock = now_ms();
         let sign_data = hashv(&[
             b"prune",
-            &borsh::to_vec(&prunes).unwrap_or_default(),
+            &borsh::to_vec(&prunes).expect("Vec<Hash> serialization cannot fail"),
             destination.as_bytes(),
             &wallclock.to_le_bytes(),
         ]);
@@ -255,6 +220,15 @@ impl ClusterInfo {
             signature,
         }
     }
+}
+
+/// Current time in milliseconds since the Unix epoch.
+/// Returns 0 on the extremely unlikely event of a backwards clock (M7).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -281,7 +255,7 @@ mod tests {
     fn new_contains_self() {
         let ci = make_cluster_info();
         assert_eq!(ci.crds().len(), 1);
-        assert!(ci.all_peers().is_empty()); // self excluded
+        assert!(ci.all_peers().is_empty());
     }
 
     #[test]
@@ -298,12 +272,8 @@ mod tests {
             1,
             1000,
         );
-        let value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(other_ci),
-            &other_kp,
-        );
-
-        assert!(ci.insert_crds_value(value));
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(other_ci), &other_kp);
+        assert!(ci.insert_verified_crds_value(value));
         assert_eq!(ci.peer_count(), 1);
     }
 
@@ -336,10 +306,7 @@ mod tests {
             1,
             1000,
         );
-        let value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(other_ci),
-            &other_kp,
-        );
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(other_ci), &other_kp);
         assert!(ci.insert_verified_crds_value(value));
         assert_eq!(ci.peer_count(), 1);
     }
@@ -350,7 +317,6 @@ mod tests {
         let real_kp = Keypair::generate();
         let forger_kp = Keypair::generate();
 
-        // Create ContactInfo for real_kp but sign with forger_kp
         let other_ci = ContactInfo::new(
             real_kp.public_key().clone(),
             "127.0.0.1:9000".parse().unwrap(),
@@ -361,11 +327,7 @@ mod tests {
             1,
             1000,
         );
-        let forged = CrdsValue::new_signed(
-            CrdsData::ContactInfo(other_ci),
-            &forger_kp,
-        );
-        // Forged value should be rejected (pubkey in ContactInfo != signer)
+        let forged = CrdsValue::new_signed(CrdsData::ContactInfo(other_ci), &forger_kp);
         assert!(!ci.insert_verified_crds_value(forged));
         assert_eq!(ci.peer_count(), 0);
     }
@@ -375,7 +337,6 @@ mod tests {
         let ci = make_cluster_info();
         let unknown_kp = Keypair::generate();
 
-        // Vote from peer whose ContactInfo hasn't been inserted yet
         let vote = CrdsVote {
             from: unknown_kp.address(),
             slot: 1,
@@ -383,8 +344,6 @@ mod tests {
             wallclock: 1000,
         };
         let value = CrdsValue::new_signed(CrdsData::Vote(vote), &unknown_kp);
-
-        // Should be rejected: unknown peer, non-ContactInfo
         assert!(!ci.insert_verified_crds_value(value));
     }
 
@@ -393,7 +352,6 @@ mod tests {
         let ci = make_cluster_info();
         let new_kp = Keypair::generate();
 
-        // ContactInfo from new peer (always self-verifiable)
         let new_ci = ContactInfo::new(
             new_kp.public_key().clone(),
             "127.0.0.1:9000".parse().unwrap(),
@@ -419,13 +377,41 @@ mod tests {
         assert_eq!(prune.prunes, prunes);
         assert_eq!(prune.destination, dest);
 
-        // Verify the signature
         let sign_data = hashv(&[
             b"prune",
-            &borsh::to_vec(&prune.prunes).unwrap_or_default(),
+            &borsh::to_vec(&prune.prunes).expect("Vec<Hash> serialization cannot fail"),
             prune.destination.as_bytes(),
             &prune.wallclock.to_le_bytes(),
         ]);
-        assert!(prune.signature.verify(ci.keypair().public_key(), sign_data.as_bytes()).is_ok());
+        assert!(
+            prune
+                .signature
+                .verify(ci.keypair().public_key(), sign_data.as_bytes())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn peers_with_stakes_defaults_to_zero() {
+        let ci = make_cluster_info();
+        let other_kp = Keypair::generate();
+        let other_ci = ContactInfo::new(
+            other_kp.public_key().clone(),
+            "127.0.0.1:9000".parse().unwrap(),
+            "127.0.0.1:9003".parse().unwrap(),
+            "127.0.0.1:9004".parse().unwrap(),
+            "127.0.0.1:9001".parse().unwrap(),
+            "127.0.0.1:9002".parse().unwrap(),
+            1,
+            1000,
+        );
+        ci.insert_verified_crds_value(CrdsValue::new_signed(
+            CrdsData::ContactInfo(other_ci),
+            &other_kp,
+        ));
+
+        let peers = ci.peers_with_stakes(&HashMap::new());
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].1, 0, "unknown peer must default to stake=0");
     }
 }

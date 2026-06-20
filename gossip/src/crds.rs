@@ -5,10 +5,12 @@ use dashmap::DashMap;
 use nusantara_crypto::Hash;
 use parking_lot::RwLock;
 
+use crate::bloom::BloomFilter;
 use crate::contact_info::ContactInfo;
 use crate::crds_value::{CrdsData, CrdsValue, CrdsValueLabel};
 use crate::error::GossipError;
 
+#[derive(Debug)]
 pub struct CrdsEntry {
     pub value: CrdsValue,
     pub insert_order: u64,
@@ -185,6 +187,28 @@ impl CrdsTable {
     pub fn all_labels(&self) -> Vec<CrdsValueLabel> {
         self.entries.iter().map(|e| e.key().clone()).collect()
     }
+
+    /// Return a bloom filter pre-loaded with all current CRDS labels.
+    /// Rebuilt from the current table state on each call (L7).
+    pub fn cached_bloom(&self, fp_rate: f64) -> BloomFilter {
+        let labels = self.all_labels();
+        let mut bloom = BloomFilter::for_capacity(labels.len().max(1), fp_rate);
+        for label in &labels {
+            let label_bytes = borsh::to_vec(label).unwrap_or_default();
+            bloom.add(&label_bytes);
+        }
+        bloom
+    }
+
+    /// Iterate values inserted after `cursor` without cloning the entire vec (L8).
+    pub fn for_each_value_since<F: FnMut(&CrdsValue)>(&self, cursor: u64, mut f: F) {
+        let index = self.ordered_index.read();
+        for (_, label) in index.range(cursor..) {
+            if let Some(entry) = self.entries.get(label) {
+                f(&entry.value);
+            }
+        }
+    }
 }
 
 impl Default for CrdsTable {
@@ -357,6 +381,36 @@ mod tests {
     }
 
     #[test]
+    fn cached_bloom_contains_all_labels() {
+        let table = CrdsTable::new();
+        let kp1 = Keypair::generate();
+        let kp2 = Keypair::generate();
+        table.insert(make_contact_value(&kp1, 1000)).unwrap();
+        table.insert(make_contact_value(&kp2, 1001)).unwrap();
+
+        let bloom = table.cached_bloom(0.01);
+        let label1 = CrdsValueLabel::ContactInfo(kp1.address());
+        let label2 = CrdsValueLabel::ContactInfo(kp2.address());
+        assert!(bloom.contains(&borsh::to_vec(&label1).unwrap()));
+        assert!(bloom.contains(&borsh::to_vec(&label2).unwrap()));
+    }
+
+    #[test]
+    fn for_each_value_since_visits_correct_entries() {
+        let table = CrdsTable::new();
+        let kp1 = Keypair::generate();
+        let kp2 = Keypair::generate();
+        table.insert(make_contact_value(&kp1, 1000)).unwrap();
+        let cursor = table.current_cursor();
+        table.insert(make_contact_value(&kp2, 1001)).unwrap();
+
+        let mut visited = Vec::new();
+        table.for_each_value_since(cursor, |v| visited.push(v.origin()));
+        assert_eq!(visited.len(), 1);
+        assert_eq!(visited[0], kp2.address());
+    }
+
+    #[test]
     fn insert_evicts_when_at_max_capacity() {
         // Verify the full insert path triggers eviction (with small count)
         let table = CrdsTable::new();
@@ -391,9 +445,7 @@ mod tests {
         // Pre-generate all values on the main thread (Keypair is not Clone)
         let kp = Keypair::generate();
         let identity = kp.address();
-        let values: Vec<CrdsValue> = (0..10)
-            .map(|i| make_contact_value(&kp, 1000 + i))
-            .collect();
+        let values: Vec<CrdsValue> = (0..10).map(|i| make_contact_value(&kp, 1000 + i)).collect();
 
         let mut handles = Vec::new();
         for v in values {

@@ -89,8 +89,9 @@ impl ValidatorNode {
                         validator.identity = identity_address.to_base64();
                         info!("bound genesis validator[0] identity to this node's keypair");
                     } else if extra_idx < cli.extra_validator_keys.len() {
-                        let extra_kp =
-                            crate::identity::load_keypair_from_path(&cli.extra_validator_keys[extra_idx])?;
+                        let extra_kp = crate::identity::load_keypair_from_path(
+                            &cli.extra_validator_keys[extra_idx],
+                        )?;
                         validator.identity = extra_kp.address().to_base64();
                         info!(
                             validator_index = i,

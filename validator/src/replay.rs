@@ -28,8 +28,7 @@ impl ValidatorNode {
                     .map(|n| (s, n.block_hash))
             })
             .collect();
-        let merged =
-            crate::helpers::build_merged_slot_hashes(&entries, &self.storage, 512);
+        let merged = crate::helpers::build_merged_slot_hashes(&entries, &self.storage, 512);
         self.bank.set_slot_hashes(SlotHashes(merged));
     }
 
@@ -115,10 +114,7 @@ impl ValidatorNode {
 
     /// Replay a received block or buffer it if parent is missing.
     /// On verification mismatch, rewinds storage and discards the block.
-    pub(crate) fn replay_or_buffer_block(
-        &mut self,
-        block: Block,
-    ) -> Result<(), ValidatorError> {
+    pub(crate) fn replay_or_buffer_block(&mut self, block: Block) -> Result<(), ValidatorError> {
         let slot = block.header.slot;
         let parent_slot = block.header.parent_slot;
 
@@ -154,11 +150,8 @@ impl ValidatorNode {
             &self.program_cache,
         ) {
             Ok(result) => {
-                self.block_producer.set_parent(
-                    slot,
-                    block.header.block_hash,
-                    result.bank_hash,
-                );
+                self.block_producer
+                    .set_parent(slot, block.header.block_hash, result.bank_hash);
 
                 // Defer root advancement
                 if let Some(root) = result.new_root {
@@ -168,11 +161,7 @@ impl ValidatorNode {
                 self.consecutive_skips.store(0, Ordering::Relaxed);
 
                 // Publish pubsub events
-                let root = self
-                    .storage
-                    .get_latest_root()
-                    .unwrap_or(None)
-                    .unwrap_or(0);
+                let root = self.storage.get_latest_root().unwrap_or(None).unwrap_or(0);
                 if let Err(e) = self.pubsub_tx.send(PubsubEvent::SlotUpdate {
                     slot,
                     parent: parent_slot,
@@ -194,9 +183,7 @@ impl ValidatorNode {
                     let sig_b58 = tx_hash.to_base58();
                     let status_str = match self.storage.get_transaction_status(&tx_hash) {
                         Ok(Some(meta)) => match &meta.status {
-                            nusantara_storage::TransactionStatus::Success => {
-                                "success".to_string()
-                            }
+                            nusantara_storage::TransactionStatus::Success => "success".to_string(),
                             nusantara_storage::TransactionStatus::Failed(msg) => {
                                 format!("failed: {msg}")
                             }
@@ -226,9 +213,7 @@ impl ValidatorNode {
                 if parent_slot < root {
                     debug!(
                         slot,
-                        parent_slot,
-                        root,
-                        "discarding block — parent already finalized and pruned"
+                        parent_slot, root, "discarding block — parent already finalized and pruned"
                     );
                     metrics::counter!("nusantara_blocks_discarded_parent_pruned").increment(1);
                     return Ok(());
@@ -253,8 +238,7 @@ impl ValidatorNode {
                 self.orphan_blocks.insert(slot, block);
                 self.request_missing_slots(parent_slot);
                 metrics::counter!("nusantara_orphan_blocks_buffered").increment(1);
-                metrics::gauge!("nusantara_orphan_queue_size")
-                    .set(self.orphan_blocks.len() as f64);
+                metrics::gauge!("nusantara_orphan_queue_size").set(self.orphan_blocks.len() as f64);
                 Ok(())
             }
             Err(ValidatorError::BankHashMismatch { slot })
@@ -263,8 +247,7 @@ impl ValidatorNode {
                 warn!(slot, "block verification mismatch — discarding");
                 if !already_stored {
                     let _ = self.storage.delete_block(slot);
-                    metrics::counter!("nusantara_blocks_deleted_verification_failure")
-                        .increment(1);
+                    metrics::counter!("nusantara_blocks_deleted_verification_failure").increment(1);
                 }
                 self.restore_bank_slot_hashes();
                 metrics::counter!("nusantara_blocks_discarded_mismatch").increment(1);
@@ -302,10 +285,8 @@ impl ValidatorNode {
                 remaining = self.orphan_blocks.len(),
                 "discarded irrecoverable orphans (parent below root)"
             );
-            metrics::counter!("nusantara_orphan_blocks_pruned_below_root")
-                .increment(pruned as u64);
-            metrics::gauge!("nusantara_orphan_queue_size")
-                .set(self.orphan_blocks.len() as f64);
+            metrics::counter!("nusantara_orphan_blocks_pruned_below_root").increment(pruned as u64);
+            metrics::gauge!("nusantara_orphan_queue_size").set(self.orphan_blocks.len() as f64);
         }
 
         loop {
@@ -325,13 +306,16 @@ impl ValidatorNode {
             let Some(slot) = ready_slot else { break };
             let block = self.orphan_blocks.remove(&slot).unwrap();
 
-            info!(slot, parent_slot = block.header.parent_slot, "replaying buffered orphan block");
+            info!(
+                slot,
+                parent_slot = block.header.parent_slot,
+                "replaying buffered orphan block"
+            );
 
             self.replay_or_buffer_block(block)?;
 
             metrics::counter!("nusantara_orphan_blocks_replayed").increment(1);
-            metrics::gauge!("nusantara_orphan_queue_size")
-                .set(self.orphan_blocks.len() as f64);
+            metrics::gauge!("nusantara_orphan_queue_size").set(self.orphan_blocks.len() as f64);
         }
         Ok(())
     }

@@ -1,7 +1,6 @@
 use nusantara_core::native_token::const_parse_u64;
 use nusantara_crypto::{Hash, Keypair};
 
-use crate::bloom::BloomFilter;
 use crate::contact_info::ContactInfo;
 use crate::crds::CrdsTable;
 use crate::crds_value::{CrdsData, CrdsValue};
@@ -10,7 +9,7 @@ use crate::protocol::{PullRequest, PullResponse};
 pub const MAX_PULL_RESPONSE_VALUES: u64 =
     const_parse_u64(env!("NUSA_GOSSIP_MAX_PULL_RESPONSE_VALUES"));
 
-/// Maximum pull response size in bytes (UDP-safe, below 65535 MTU).
+/// Maximum pull response size in bytes (UDP-safe, below 65507 MTU).
 const MAX_PULL_RESPONSE_SIZE: usize = 65000;
 
 pub struct CrdsGossipPull {
@@ -29,17 +28,10 @@ impl CrdsGossipPull {
         keypair: &Keypair,
         self_contact_info: &ContactInfo,
     ) -> PullRequest {
-        let labels = crds.all_labels();
-        let mut bloom = BloomFilter::for_capacity(labels.len().max(1), 0.1);
-        for label in &labels {
-            let label_bytes = borsh::to_vec(label).unwrap_or_default();
-            bloom.add(&label_bytes);
-        }
+        let bloom = crds.cached_bloom(0.1);
 
-        let self_value = CrdsValue::new_signed(
-            CrdsData::ContactInfo(self_contact_info.clone()),
-            keypair,
-        );
+        let self_value =
+            CrdsValue::new_signed(CrdsData::ContactInfo(self_contact_info.clone()), keypair);
 
         PullRequest {
             filter: bloom,
@@ -49,11 +41,7 @@ impl CrdsGossipPull {
 
     /// Process a pull request: return values not in the requester's bloom filter.
     /// Uses size-aware accumulation to prevent MTU overflow.
-    pub fn process_pull_request(
-        &self,
-        crds: &CrdsTable,
-        request: &PullRequest,
-    ) -> PullResponse {
+    pub fn process_pull_request(&self, crds: &CrdsTable, request: &PullRequest) -> PullResponse {
         if !request.filter.is_valid() {
             metrics::counter!("nusantara_gossip_pull_invalid_bloom_total").increment(1);
             return PullResponse {
@@ -73,7 +61,7 @@ impl CrdsGossipPull {
                 continue;
             }
 
-            let value_size = estimate_crds_value_size(&v);
+            let value_size = crds_value_serialized_size(&v);
             if total_size + value_size > MAX_PULL_RESPONSE_SIZE {
                 metrics::counter!("nusantara_gossip_pull_response_truncated_total").increment(1);
                 break;
@@ -93,13 +81,19 @@ impl CrdsGossipPull {
     }
 
     /// Process a pull response: verify and insert values into our CRDS table.
-    /// Values with embedded pubkeys (ContactInfo) are verified directly.
-    /// Other values are verified against known ContactInfo pubkeys in CRDS.
-    /// Non-ContactInfo values from unknown peers are REJECTED.
+    /// Short-circuits stale values before signature verification (L19).
     pub fn process_pull_response(&self, crds: &CrdsTable, response: &PullResponse) -> usize {
         let mut inserted = 0;
         for value in &response.values {
-            // Verify signature before inserting
+            // Skip sig verify for values we already have at equal or newer wallclock (L19).
+            if crds
+                .get(&value.label())
+                .map(|existing| existing.wallclock() >= value.wallclock())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
             let pubkey = match &value.data {
                 CrdsData::ContactInfo(ci) => Some(ci.pubkey.clone()),
                 _ => crds
@@ -110,13 +104,14 @@ impl CrdsGossipPull {
             match &pubkey {
                 Some(pk) => {
                     if !value.verify(pk) {
-                        metrics::counter!("nusantara_gossip_pull_invalid_signature_total").increment(1);
+                        metrics::counter!("nusantara_gossip_pull_invalid_signature_total")
+                            .increment(1);
                         continue;
                     }
                 }
                 None => {
-                    // Non-ContactInfo from unknown peer — reject
-                    metrics::counter!("nusantara_gossip_unverifiable_value_dropped_total").increment(1);
+                    metrics::counter!("nusantara_gossip_unverifiable_value_dropped_total")
+                        .increment(1);
                     continue;
                 }
             }
@@ -126,25 +121,17 @@ impl CrdsGossipPull {
             }
         }
         if inserted > 0 {
-            metrics::counter!("nusantara_gossip_pull_values_received_total").increment(inserted as u64);
+            metrics::counter!("nusantara_gossip_pull_values_received_total")
+                .increment(inserted as u64);
         }
         inserted
     }
 }
 
-/// Estimate the borsh-serialized size of a CRDS value (approximate).
-fn estimate_crds_value_size(value: &CrdsValue) -> usize {
-    // Signature is Vec<u8> with 4-byte length prefix (4 + 3309 bytes for Dilithium3)
-    // Data varies by variant
-    let data_size = match &value.data {
-        CrdsData::ContactInfo(_) => 2200, // pubkey(4+1952) + addrs + fields
-        CrdsData::Vote(_) => 200,         // from(64) + slot(8) + hash(64) + wallclock(8)
-        CrdsData::EpochSlots(es) => 100 + es.slots.len() * 8,
-        CrdsData::LowestSlot(_) => 150,
-        CrdsData::SlashProof(_) => 350,
-    };
-    // enum tag(1) + data_size + signature(4 + 3309)
-    1 + data_size + 4 + 3309
+/// Compute the exact Borsh-serialized size of a CRDS value (M6).
+/// Uses borsh::object_length for accuracy; adds 8 bytes overhead margin.
+fn crds_value_serialized_size(value: &CrdsValue) -> usize {
+    borsh::object_length(value).unwrap_or(0) + 8
 }
 
 #[cfg(test)]
@@ -186,11 +173,9 @@ mod tests {
         let kp1 = Keypair::generate();
         let kp2 = Keypair::generate();
 
-        // Node 1's CRDS is empty
         let crds1 = CrdsTable::new();
         let pull1 = CrdsGossipPull::new(kp1.address());
 
-        // Node 2 has some values
         let crds2 = CrdsTable::new();
         let pull2 = CrdsGossipPull::new(kp2.address());
         let ci2 = make_contact_info(&kp2);
@@ -201,15 +186,12 @@ mod tests {
             ))
             .unwrap();
 
-        // Node 1 sends pull request to node 2
         let ci1 = make_contact_info(&kp1);
         let req = pull1.build_pull_request(&crds1, &kp1, &ci1);
 
-        // Node 2 responds
         let resp = pull2.process_pull_request(&crds2, &req);
         assert!(!resp.values.is_empty());
 
-        // Node 1 processes response
         let inserted = pull1.process_pull_response(&crds1, &resp);
         assert!(inserted > 0);
         assert!(!crds1.is_empty());
@@ -223,7 +205,6 @@ mod tests {
         let crds1 = CrdsTable::new();
         let crds2 = CrdsTable::new();
 
-        // Both nodes have the same value
         let ci = make_contact_info(&kp2);
         let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci.clone()), &kp2);
         crds1.insert(value.clone()).unwrap();
@@ -236,7 +217,6 @@ mod tests {
         let req = pull1.build_pull_request(&crds1, &kp1, &ci1);
         let resp = pull2.process_pull_request(&crds2, &req);
 
-        // Node 2's value should be filtered by bloom
         assert!(resp.values.is_empty());
     }
 
@@ -247,7 +227,6 @@ mod tests {
         let crds = CrdsTable::new();
         let pull = CrdsGossipPull::new(kp1.address());
 
-        // Forge a vote from an unknown peer
         use crate::crds_value::CrdsVote;
         let vote = CrdsVote {
             from: unknown_kp.address(),
@@ -262,8 +241,46 @@ mod tests {
             values: vec![value],
         };
 
-        // Should reject: unknown peer, non-ContactInfo
         let inserted = pull.process_pull_response(&crds, &resp);
         assert_eq!(inserted, 0);
+    }
+
+    #[test]
+    fn stale_value_skips_sig_verify() {
+        let kp = Keypair::generate();
+        let crds = CrdsTable::new();
+        let pull = CrdsGossipPull::new(kp.address());
+
+        // Insert value at wallclock 2000.
+        let ci = make_contact_info(&kp);
+        let mut ci_new = ci.clone();
+        ci_new.wallclock = 2000;
+        let v_new = CrdsValue::new_signed(CrdsData::ContactInfo(ci_new), &kp);
+        crds.insert(v_new).unwrap();
+
+        // Attempt to pull a stale value (wallclock 1000 < 2000).
+        let v_old = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
+        let resp = PullResponse {
+            from: kp.address(),
+            values: vec![v_old],
+        };
+
+        // Must be skipped (stale), not inserted.
+        let inserted = pull.process_pull_response(&crds, &resp);
+        assert_eq!(inserted, 0);
+    }
+
+    #[test]
+    fn crds_value_size_is_exact() {
+        let kp = Keypair::generate();
+        let ci = make_contact_info(&kp);
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
+        let actual = borsh::to_vec(&value).unwrap().len();
+        let estimated = crds_value_serialized_size(&value);
+        // Estimated must be >= actual (never under-counts).
+        assert!(
+            estimated >= actual,
+            "estimate {estimated} < actual {actual}"
+        );
     }
 }

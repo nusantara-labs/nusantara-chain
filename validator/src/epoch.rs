@@ -202,8 +202,7 @@ fn collect_rent_blocking(
     let mut accounts_closed = 0u64;
     let mut deltas = Vec::new();
 
-    let ms_per_epoch =
-        epoch_schedule.slots_per_epoch * nusantara_core::DEFAULT_SLOT_DURATION_MS;
+    let ms_per_epoch = epoch_schedule.slots_per_epoch * nusantara_core::DEFAULT_SLOT_DURATION_MS;
 
     let mut batch = StorageWriteBatch::new();
 
@@ -318,9 +317,7 @@ fn distribute_epoch_rewards_blocking(
 
             for partition in rewards.partitions.values() {
                 for entry in partition {
-                    if let Ok(Some(mut account)) =
-                        storage.get_account(&entry.stake_account)
-                    {
+                    if let Ok(Some(mut account)) = storage.get_account(&entry.stake_account) {
                         let old_account = account.clone();
                         account.lamports = account.lamports.saturating_add(entry.lamports);
                         if let Err(e) = Storage::append_account_write_with_old(
@@ -343,8 +340,7 @@ fn distribute_epoch_rewards_blocking(
                     }
 
                     if entry.commission_lamports > 0
-                        && let Ok(Some(mut vote_account)) =
-                            storage.get_account(&entry.vote_account)
+                        && let Ok(Some(mut vote_account)) = storage.get_account(&entry.vote_account)
                     {
                         let old_vote = vote_account.clone();
                         vote_account.lamports = vote_account

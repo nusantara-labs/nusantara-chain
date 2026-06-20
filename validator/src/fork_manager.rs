@@ -156,14 +156,20 @@ impl ValidatorNode {
         );
 
         // 1. Rollback bank to common ancestor
-        if let Err(e) = self.bank.rollback_to_slot(plan.common_ancestor, &self.storage) {
+        if let Err(e) = self
+            .bank
+            .rollback_to_slot(plan.common_ancestor, &self.storage)
+        {
             warn!(error = %e, "fork switch: bank rollback failed");
             self.failed_fork_targets.insert(target);
             return;
         }
 
         // 2. Rewind account index
-        match self.storage.rewind_account_index_to_slot(plan.common_ancestor) {
+        match self
+            .storage
+            .rewind_account_index_to_slot(plan.common_ancestor)
+        {
             Ok(rewound) => {
                 if rewound > 0 {
                     info!(rewound, "account index rewound for fork switch");
@@ -180,7 +186,10 @@ impl ValidatorNode {
         // 3. Replay blocks on the new fork (skip slots already in fork tree)
         for slot in &plan.replay_slots {
             if self.replay_stage.fork_tree().contains(*slot) {
-                tracing::debug!(slot, "slot already in fork tree, skipping fork-switch replay");
+                tracing::debug!(
+                    slot,
+                    "slot already in fork tree, skipping fork-switch replay"
+                );
                 continue;
             }
             match self.storage.get_block(*slot) {

@@ -3,13 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use nusantara_consensus::leader_schedule::LeaderScheduleGenerator;
 use nusantara_core::Transaction;
 use nusantara_crypto::Hash;
 use nusantara_gossip::GossipService;
 use nusantara_rpc::{RpcServer, RpcState, RpcTlsConfig};
-use nusantara_consensus::leader_schedule::LeaderScheduleGenerator;
 use nusantara_tpu_forward::TpuService;
-use nusantara_turbine::protocol::{RepairRequest, MAX_UDP_PACKET};
+use nusantara_turbine::protocol::{MAX_UDP_PACKET, RepairRequest};
 use nusantara_turbine::repair_service::MAX_REPAIR_BATCH_REQUEST;
 use nusantara_turbine::turbine_tree::TURBINE_FANOUT;
 use nusantara_turbine::{
@@ -110,7 +110,7 @@ impl ValidatorNode {
             let mut peers: Vec<Hash> = tree_cluster_info
                 .all_peers()
                 .iter()
-                .map(|ci| ci.identity)
+                .map(|ci| ci.identity())
                 .collect();
             if !peers.contains(&tree_identity) {
                 peers.push(tree_identity);
@@ -167,7 +167,7 @@ impl ValidatorNode {
             repair_ci
                 .all_peers()
                 .iter()
-                .filter(|ci| ci.identity != my_identity)
+                .filter(|ci| ci.identity() != my_identity)
                 .map(|ci| ci.repair_addr.0)
                 .collect()
         };
@@ -268,7 +268,9 @@ impl ValidatorNode {
             nusantara_genesis::load_faucet_keypair(&self.storage)
                 .map(Arc::new)
                 .or_else(|| {
-                    tracing::warn!("no faucet keypair in genesis, falling back to validator identity");
+                    tracing::warn!(
+                        "no faucet keypair in genesis, falling back to validator identity"
+                    );
                     Some(Arc::clone(&self.keypair))
                 })
         } else {
@@ -342,10 +344,11 @@ fn spawn_repair_responder(
 ) {
     tokio::spawn(async move {
         let mut buf = vec![0u8; MAX_UDP_PACKET];
-        let shred_cache: Arc<parking_lot::Mutex<lru::LruCache<u64, Arc<nusantara_turbine::ShredBatch>>>> =
-            Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
-                std::num::NonZero::new(64).unwrap(),
-            )));
+        let shred_cache: Arc<
+            parking_lot::Mutex<lru::LruCache<u64, Arc<nusantara_turbine::ShredBatch>>>,
+        > = Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZero::new(64).unwrap(),
+        )));
         // Note: we intentionally do NOT use a negative cache for empty slots
         // because peers may receive blocks via turbine AFTER a repair request
         // misses, and a stale negative cache would block all future responses.

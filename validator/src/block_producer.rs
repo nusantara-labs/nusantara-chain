@@ -12,8 +12,8 @@ use tracing::{info, instrument};
 
 use nusantara_consensus::bank::FrozenBankState;
 
-use crate::helpers;
 use crate::error::ValidatorError;
+use crate::helpers;
 
 /// Deferred block storage operations that can run in the background.
 pub struct PendingBlockStorage {
@@ -154,7 +154,10 @@ impl BlockProducer {
             is_connected: true,
             completed: true,
         };
-        let pending_storage = PendingBlockStorage { slot_meta, frozen: frozen.clone() };
+        let pending_storage = PendingBlockStorage {
+            slot_meta,
+            frozen: frozen.clone(),
+        };
 
         // 12. Update consensus bank (in-memory only, fast)
         self.bank.record_slot_hash(slot, block_hash);
@@ -173,8 +176,7 @@ impl BlockProducer {
         metrics::histogram!("nusantara_block_time_ms").record(elapsed.as_millis() as f64);
         metrics::gauge!("nusantara_transactions_per_slot")
             .set(exec_result.transactions_executed as f64);
-        metrics::gauge!("nusantara_state_tree_leaves")
-            .set(self.bank.state_tree_len() as f64);
+        metrics::gauge!("nusantara_state_tree_leaves").set(self.bank.state_tree_len() as f64);
 
         info!(
             slot,

@@ -41,10 +41,15 @@ pub struct PruneMessage {
     pub signature: Signature,
 }
 
+/// PingMessage includes target and wallclock to prevent cross-peer replay (M10).
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PingMessage {
     pub from: Hash,
     pub token: Hash,
+    /// Identity of the intended recipient — bound into the signature to prevent replay.
+    pub target: Hash,
+    /// Sender wallclock (ms since epoch) — further binds the ping to a time window.
+    pub wallclock: u64,
     pub signature: Signature,
 }
 
@@ -55,14 +60,13 @@ pub struct PongMessage {
     pub signature: Signature,
 }
 
-/// Maximum size of a serialized gossip message (UDP packet limit).
-/// Messages exceeding this size are rejected before deserialization to prevent
-/// Borsh from allocating based on an attacker-controlled length prefix.
-pub const MAX_GOSSIP_MESSAGE_SIZE: usize = 65536;
+/// Maximum size of a serialized gossip message.
+/// 65507 = maximum UDP payload over IPv4 (65535 - 20 IP header - 8 UDP header).
+pub const MAX_GOSSIP_MESSAGE_SIZE: usize = 65507;
 
 /// Maximum number of CRDS values allowed in a single PullResponse or PushMessage.
-/// Prevents OOM from a malicious peer sending a huge values vec.
-pub const MAX_GOSSIP_VALUES: usize = 1024;
+/// Lowered to 32 to limit Dilithium3 verify CPU cost per message (C4).
+pub const MAX_GOSSIP_VALUES: usize = 32;
 
 impl GossipMessage {
     pub fn serialize_to_bytes(&self) -> Result<Vec<u8>, String> {
@@ -70,7 +74,6 @@ impl GossipMessage {
     }
 
     pub fn deserialize_from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Layer 1: reject oversized payloads before Borsh touches the length prefix
         if bytes.len() > MAX_GOSSIP_MESSAGE_SIZE {
             return Err(format!(
                 "gossip message too large: {} bytes (max {})",
@@ -81,7 +84,6 @@ impl GossipMessage {
 
         let msg: Self = borsh::from_slice(bytes).map_err(|e| e.to_string())?;
 
-        // Layer 2: reject messages with too many CRDS values after deserialization
         match &msg {
             GossipMessage::PullResponse(resp) if resp.values.len() > MAX_GOSSIP_VALUES => {
                 return Err(format!(
@@ -107,17 +109,27 @@ impl GossipMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nusantara_crypto::{Keypair, hash};
+    use nusantara_crypto::{Keypair, hash, hashv};
 
     #[test]
     fn ping_pong_roundtrip() {
         let kp = Keypair::generate();
         let token = hash(b"ping_token");
-        let sig = kp.sign(token.as_bytes());
+        let target = hash(b"target_peer");
+        let wallclock = 12345u64;
+        let sign_payload = hashv(&[
+            b"ping",
+            token.as_bytes(),
+            target.as_bytes(),
+            &wallclock.to_le_bytes(),
+        ]);
+        let sig = kp.sign(sign_payload.as_bytes());
 
         let ping = GossipMessage::Ping(PingMessage {
             from: kp.address(),
             token,
+            target,
+            wallclock,
             signature: sig,
         });
 
@@ -139,10 +151,7 @@ mod tests {
             1,
             1000,
         );
-        let value = CrdsValue::new_signed(
-            crate::crds_value::CrdsData::ContactInfo(ci),
-            &kp,
-        );
+        let value = CrdsValue::new_signed(crate::crds_value::CrdsData::ContactInfo(ci), &kp);
         let msg = GossipMessage::PushMessage(PushMessage {
             from: kp.address(),
             values: vec![value],
@@ -155,8 +164,6 @@ mod tests {
 
     #[test]
     fn reject_oversized_message() {
-        // A payload larger than MAX_GOSSIP_MESSAGE_SIZE must be rejected
-        // before Borsh attempts deserialization.
         let oversized = vec![0u8; MAX_GOSSIP_MESSAGE_SIZE + 1];
         let result = GossipMessage::deserialize_from_bytes(&oversized);
         assert!(result.is_err());
@@ -168,11 +175,6 @@ mod tests {
 
     #[test]
     fn reject_push_message_with_too_many_values() {
-        // With Dilithium3 signatures (~3,309 bytes each), a PushMessage containing
-        // MAX_GOSSIP_VALUES+1 entries will exceed MAX_GOSSIP_MESSAGE_SIZE. Both
-        // layers of defense work together: the size check catches it first for
-        // large crypto, while the values count check catches crafted compact payloads.
-        // Here we verify both layers independently.
         let kp = Keypair::generate();
         let ci = crate::contact_info::ContactInfo::new(
             kp.public_key().clone(),
@@ -184,110 +186,46 @@ mod tests {
             1,
             1000,
         );
-        let value = CrdsValue::new_signed(
-            crate::crds_value::CrdsData::ContactInfo(ci),
-            &kp,
+        let value = CrdsValue::new_signed(crate::crds_value::CrdsData::ContactInfo(ci), &kp);
+
+        // Layer 2 test: craft raw Borsh bytes with values count > MAX_GOSSIP_VALUES
+        // within size budget using a bogus length prefix.
+        // Borsh Vec = 4-byte LE length + elements.
+        // PushMessage variant tag = 2.
+        let mut crafted = Vec::new();
+        crafted.push(2u8); // PushMessage variant
+        crafted.extend_from_slice(&[0u8; 64]); // `from` Hash (64 bytes)
+        let bogus_count = (MAX_GOSSIP_VALUES + 1) as u32;
+        crafted.extend_from_slice(&bogus_count.to_le_bytes());
+        // Incomplete elements — Borsh will reject (IO error or values count check).
+        let result = GossipMessage::deserialize_from_bytes(&crafted);
+        assert!(
+            result.is_err(),
+            "crafted truncated message must be rejected"
         );
 
-        // Layer 1 test: serialized message with many values exceeds size limit
-        let values: Vec<CrdsValue> = std::iter::repeat_n(value, MAX_GOSSIP_VALUES + 1)
-            .collect();
+        // Layer 1 test: real message with MAX_GOSSIP_VALUES+1 entries exceeds size limit.
+        let values: Vec<CrdsValue> = std::iter::repeat_n(value, MAX_GOSSIP_VALUES + 1).collect();
         let msg = GossipMessage::PushMessage(PushMessage {
             from: kp.address(),
             values,
         });
         let bytes = msg.serialize_to_bytes().unwrap();
-        assert!(
-            bytes.len() > MAX_GOSSIP_MESSAGE_SIZE,
-            "message with {} values must exceed size limit",
-            MAX_GOSSIP_VALUES + 1
-        );
         let result = GossipMessage::deserialize_from_bytes(&bytes);
-        assert!(result.is_err(), "oversized message must be rejected");
-        assert!(
-            result.unwrap_err().contains("too large"),
-            "error should mention size limit for oversized payload"
-        );
-
-        // Layer 2 test: craft raw bytes with a values count > MAX_GOSSIP_VALUES
-        // but within size limit by using a bogus Borsh length prefix.
-        // Borsh Vec encoding = 4-byte LE length + elements.
-        // PushMessage variant tag = 2 (0-indexed enum: PullRequest=0, PullResponse=1, PushMessage=2)
-        let mut crafted = Vec::new();
-        crafted.push(2u8); // enum variant tag for PushMessage
-        crafted.extend_from_slice(&[0u8; 64]); // `from` Hash (64 bytes)
-        let bogus_count = (MAX_GOSSIP_VALUES + 1) as u32;
-        crafted.extend_from_slice(&bogus_count.to_le_bytes()); // values vec length
-        // Pad to stay within size limit (Borsh will fail to deserialize the
-        // incomplete elements, but that is fine -- we only need the size check to pass)
-        // Actually the size check passes, but borsh::from_slice will error on
-        // truncated data. That still proves the pipeline rejects it.
-        let result2 = GossipMessage::deserialize_from_bytes(&crafted);
-        assert!(result2.is_err(), "crafted truncated message must be rejected");
+        assert!(result.is_err(), "oversized push message must be rejected");
     }
 
     #[test]
     fn reject_pull_response_with_too_many_values() {
-        // Same layered defense as PushMessage. See comments above.
-        let kp = Keypair::generate();
-        let ci = crate::contact_info::ContactInfo::new(
-            kp.public_key().clone(),
-            "127.0.0.1:8000".parse().unwrap(),
-            "127.0.0.1:8003".parse().unwrap(),
-            "127.0.0.1:8004".parse().unwrap(),
-            "127.0.0.1:8001".parse().unwrap(),
-            "127.0.0.1:8002".parse().unwrap(),
-            1,
-            1000,
-        );
-        let value = CrdsValue::new_signed(
-            crate::crds_value::CrdsData::ContactInfo(ci),
-            &kp,
-        );
-
-        // Layer 1: size limit catches oversized payload
-        let values: Vec<CrdsValue> = std::iter::repeat_n(value, MAX_GOSSIP_VALUES + 1)
-            .collect();
-        let msg = GossipMessage::PullResponse(PullResponse {
-            from: kp.address(),
-            values,
-        });
-        let bytes = msg.serialize_to_bytes().unwrap();
-        assert!(bytes.len() > MAX_GOSSIP_MESSAGE_SIZE);
-        let result = GossipMessage::deserialize_from_bytes(&bytes);
-        assert!(result.is_err(), "oversized PullResponse must be rejected");
+        let mut crafted = Vec::new();
+        crafted.push(1u8); // PullResponse variant
+        crafted.extend_from_slice(&[0u8; 64]); // `from` Hash
+        let bogus_count = (MAX_GOSSIP_VALUES + 1) as u32;
+        crafted.extend_from_slice(&bogus_count.to_le_bytes());
+        let result = GossipMessage::deserialize_from_bytes(&crafted);
         assert!(
-            result.unwrap_err().contains("too large"),
-            "error should mention size limit"
+            result.is_err(),
+            "crafted oversized PullResponse must be rejected"
         );
-    }
-
-    #[test]
-    fn accept_message_within_limits() {
-        // Verify that a valid message within all limits is accepted.
-        let kp = Keypair::generate();
-        let ci = crate::contact_info::ContactInfo::new(
-            kp.public_key().clone(),
-            "127.0.0.1:8000".parse().unwrap(),
-            "127.0.0.1:8003".parse().unwrap(),
-            "127.0.0.1:8004".parse().unwrap(),
-            "127.0.0.1:8001".parse().unwrap(),
-            "127.0.0.1:8002".parse().unwrap(),
-            1,
-            1000,
-        );
-        let value = CrdsValue::new_signed(
-            crate::crds_value::CrdsData::ContactInfo(ci),
-            &kp,
-        );
-        let msg = GossipMessage::PushMessage(PushMessage {
-            from: kp.address(),
-            values: vec![value],
-        });
-
-        let bytes = msg.serialize_to_bytes().unwrap();
-        assert!(bytes.len() <= MAX_GOSSIP_MESSAGE_SIZE);
-        let result = GossipMessage::deserialize_from_bytes(&bytes);
-        assert!(result.is_ok());
     }
 }

@@ -7,8 +7,10 @@ use crate::protocol::{PingMessage, PongMessage};
 
 pub struct PingCache {
     verified: DashMap<Hash, Instant>,
-    /// Pending pong responses: peer_identity -> (ping_token, sent_at)
-    pending: DashMap<Hash, (Hash, Instant)>,
+    /// Pending pong responses keyed by (peer_identity, token_hash) so a forged
+    /// `from` field cannot strip a legitimate pending entry before sig verify (C2, M3).
+    /// Value is (original_token, wallclock, sent_at).
+    pending: DashMap<(Hash, Hash), (Hash, u64, Instant)>,
     ttl: std::time::Duration,
 }
 
@@ -34,14 +36,25 @@ impl PingCache {
     }
 
     /// Create a ping message targeting a specific peer identity.
-    /// Stores the token in `pending` so the response can be verified.
+    /// Binds the token to target identity and wallclock to prevent replay (M10).
     pub fn create_ping(&self, keypair: &Keypair, target: Hash) -> PingMessage {
         let token = crypto_hash(&rand::random::<[u8; 32]>());
-        self.pending.insert(target, (token, Instant::now()));
-        let sig = keypair.sign(token.as_bytes());
+        let wallclock = now_ms();
+        let sign_payload = hashv(&[
+            b"ping",
+            token.as_bytes(),
+            target.as_bytes(),
+            &wallclock.to_le_bytes(),
+        ]);
+        let sig = keypair.sign(sign_payload.as_bytes());
+        let token_hash = crypto_hash(token.as_bytes());
+        self.pending
+            .insert((target, token_hash), (token, wallclock, Instant::now()));
         PingMessage {
             from: keypair.address(),
             token,
+            target,
+            wallclock,
             signature: sig,
         }
     }
@@ -58,17 +71,21 @@ impl PingCache {
     }
 
     /// Verify a pong response:
-    /// 1. Check that we have a pending ping for this peer
-    /// 2. Verify the token hash matches
-    /// 3. Verify the pong signature against the peer's public key
+    /// 1. Look up pending entry by (pong.from, pong.token_hash) without removing it (C2).
+    /// 2. Check TTL.
+    /// 3. Verify the pong signature against the peer's public key.
+    /// 4. Only remove the pending entry on success.
     pub fn verify_pong(&self, pong: &PongMessage, pubkey: &PublicKey) -> bool {
-        let pending_token = match self.pending.remove(&pong.from) {
-            Some((_, (token, sent_at))) => {
-                if sent_at.elapsed() >= self.ttl {
+        let key = (pong.from, pong.token_hash);
+
+        // Read first — do NOT remove before verifying (C2 fix).
+        let ttl_ok = match self.pending.get(&key) {
+            Some(entry) => {
+                if entry.2.elapsed() >= self.ttl {
                     metrics::counter!("nusantara_gossip_pong_expired_total").increment(1);
                     return false;
                 }
-                token
+                true
             }
             None => {
                 metrics::counter!("nusantara_gossip_pong_unsolicited_total").increment(1);
@@ -76,25 +93,36 @@ impl PingCache {
             }
         };
 
-        let expected_hash = crypto_hash(pending_token.as_bytes());
-        if pong.token_hash != expected_hash {
-            metrics::counter!("nusantara_gossip_pong_verification_failed_total").increment(1);
+        if !ttl_ok {
             return false;
         }
 
-        // Verify signature: pong signs hashv(&[b"pong", token_hash])
+        // Verify signature before touching the pending map.
         let sign_data = hashv(&[b"pong", pong.token_hash.as_bytes()]);
         if pong.signature.verify(pubkey, sign_data.as_bytes()).is_err() {
             metrics::counter!("nusantara_gossip_pong_verification_failed_total").increment(1);
             return false;
         }
 
+        // Signature verified — now remove to prevent replay.
+        self.pending.remove(&key);
         true
     }
 
     /// Verify a ping message signature against the sender's public key.
+    /// The signature covers hashv(&[b"ping", token, target, wallclock]) (M10).
     pub fn verify_ping(ping: &PingMessage, pubkey: &PublicKey) -> bool {
-        if ping.signature.verify(pubkey, ping.token.as_bytes()).is_err() {
+        let sign_payload = hashv(&[
+            b"ping",
+            ping.token.as_bytes(),
+            ping.target.as_bytes(),
+            &ping.wallclock.to_le_bytes(),
+        ]);
+        if ping
+            .signature
+            .verify(pubkey, sign_payload.as_bytes())
+            .is_err()
+        {
             metrics::counter!("nusantara_gossip_ping_invalid_signature_total").increment(1);
             return false;
         }
@@ -102,13 +130,14 @@ impl PingCache {
     }
 
     pub fn purge_expired(&self) {
-        self.verified.retain(|_, instant| instant.elapsed() < self.ttl);
+        self.verified
+            .retain(|_, instant| instant.elapsed() < self.ttl);
         self.purge_expired_pending();
     }
 
-    /// Clean up stale pending pong entries.
     pub fn purge_expired_pending(&self) {
-        self.pending.retain(|_, (_, sent_at)| sent_at.elapsed() < self.ttl);
+        self.pending
+            .retain(|_, (_, _, sent_at)| sent_at.elapsed() < self.ttl);
     }
 
     pub fn len(&self) -> usize {
@@ -118,6 +147,13 @@ impl PingCache {
     pub fn is_empty(&self) -> bool {
         self.verified.is_empty()
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -133,11 +169,11 @@ mod tests {
         let target = kp2.address();
         let ping = cache.create_ping(&kp1, target);
         assert_eq!(ping.from, kp1.address());
+        assert_eq!(ping.target, target);
 
         let pong = PingCache::create_pong(&kp2, &ping);
         assert_eq!(pong.from, kp2.address());
 
-        // Pong should verify with kp2's pubkey
         assert!(cache.verify_pong(&pong, kp2.public_key()));
     }
 
@@ -151,7 +187,6 @@ mod tests {
         let ping = cache.create_ping(&kp1, kp2.address());
         let pong = PingCache::create_pong(&kp2, &ping);
 
-        // Verifying with wrong pubkey should fail
         assert!(!cache.verify_pong(&pong, kp3.public_key()));
     }
 
@@ -161,16 +196,51 @@ mod tests {
         let kp2 = Keypair::generate();
         let cache = PingCache::new(60_000);
 
-        // Create a pong without a corresponding ping
+        let fake_token = crypto_hash(b"fake_token");
         let fake_ping = PingMessage {
             from: kp1.address(),
-            token: crypto_hash(b"fake_token"),
-            signature: kp1.sign(crypto_hash(b"fake_token").as_bytes()),
+            token: fake_token,
+            target: kp2.address(),
+            wallclock: now_ms(),
+            signature: {
+                let payload = hashv(&[
+                    b"ping",
+                    fake_token.as_bytes(),
+                    kp2.address().as_bytes(),
+                    &now_ms().to_le_bytes(),
+                ]);
+                kp1.sign(payload.as_bytes())
+            },
         };
         let pong = PingCache::create_pong(&kp2, &fake_ping);
 
-        // No pending entry, should be rejected
         assert!(!cache.verify_pong(&pong, kp2.public_key()));
+    }
+
+    #[test]
+    fn forged_from_does_not_strip_pending_entry() {
+        let kp1 = Keypair::generate();
+        let kp2 = Keypair::generate();
+        let attacker_kp = Keypair::generate();
+        let cache = PingCache::new(60_000);
+
+        let ping = cache.create_ping(&kp1, kp2.address());
+        let token_hash = crypto_hash(ping.token.as_bytes());
+
+        // Attacker forges a pong with kp2's identity but wrong token_hash to probe the pending map.
+        let sign_data = hashv(&[b"pong", token_hash.as_bytes()]);
+        let forged_pong = PongMessage {
+            from: kp2.address(),
+            token_hash: crypto_hash(b"wrong_token"),
+            signature: attacker_kp.sign(sign_data.as_bytes()),
+        };
+
+        // Forged pong should be rejected (key mismatch → unsolicited).
+        assert!(!cache.verify_pong(&forged_pong, attacker_kp.public_key()));
+
+        // The real pending entry must still be present.
+        let real_pong = PingCache::create_pong(&kp2, &ping);
+        assert!(cache.verify_pong(&real_pong, kp2.public_key()));
     }
 
     #[test]

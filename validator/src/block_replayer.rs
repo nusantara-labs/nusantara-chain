@@ -50,10 +50,7 @@ pub fn replay_block_full(
         .fork_tree()
         .get_node(parent_slot)
         .map(|n| n.bank_hash)
-        .ok_or(ValidatorError::MissingParentBlock {
-            slot,
-            parent_slot,
-        })?;
+        .ok_or(ValidatorError::MissingParentBlock { slot, parent_slot })?;
 
     // 2. Rollback bank state to parent_slot.
     bank.rollback_to_slot(parent_slot, storage)?;
@@ -104,7 +101,11 @@ pub fn replay_block_full(
     let ancestor_set: HashSet<u64> = ancestry.iter().copied().collect();
     let rewound = storage.rewind_account_index_for_ancestry(&ancestor_set)?;
     if rewound > 0 {
-        tracing::info!(parent_slot, rewound, "rewound account index (fork-aware) before replay");
+        tracing::info!(
+            parent_slot,
+            rewound,
+            "rewound account index (fork-aware) before replay"
+        );
     }
 
     // 7. Execute slot via runtime (parallel, same as produce_block path).
@@ -125,10 +126,8 @@ pub fn replay_block_full(
 
     // 8. Verify bank_hash BEFORE committing anything to storage.
     //    (parent_bank_hash was obtained in step 1)
-    let expected_bank_hash = ConsensusBank::compute_bank_hash(
-        &parent_bank_hash,
-        &exec_result.account_delta_hash,
-    );
+    let expected_bank_hash =
+        ConsensusBank::compute_bank_hash(&parent_bank_hash, &exec_result.account_delta_hash);
     if expected_bank_hash != block.header.bank_hash {
         tracing::warn!(
             slot,

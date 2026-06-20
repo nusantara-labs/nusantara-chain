@@ -5,12 +5,6 @@ pub enum GossipError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
-    #[error("deserialization error: {0}")]
-    Deserialization(String),
-
     #[error("signature verification failed for {identity}")]
     SignatureVerification { identity: String },
 

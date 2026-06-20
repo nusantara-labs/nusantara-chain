@@ -50,16 +50,12 @@ async fn main() {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .init();
 
     // Initialize metrics exporter
-    let addr: SocketAddr = cli
-        .metrics_addr
-        .parse()
-        .expect("invalid metrics address");
+    let addr: SocketAddr = cli.metrics_addr.parse().expect("invalid metrics address");
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .with_http_listener(addr)
         .install()

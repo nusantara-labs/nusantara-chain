@@ -5,30 +5,67 @@ use nusantara_crypto::{Hash, Keypair, PublicKey, Signature};
 
 use crate::contact_info::ContactInfo;
 
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+/// A signed CRDS record. `signed_bytes` caches the serialized form of `data`
+/// so `verify` does not re-serialize on every call (M12).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrdsValue {
     pub data: CrdsData,
     pub signature: Signature,
+    /// Serialized `data` bytes used for signing and verification.
+    /// Not written to / read from wire — recomputed on deserialize.
+    signed_bytes: Vec<u8>,
+}
+
+impl BorshSerialize for CrdsValue {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.data.serialize(writer)?;
+        self.signature.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for CrdsValue {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let data = CrdsData::deserialize_reader(reader)?;
+        let signature = Signature::deserialize_reader(reader)?;
+        let signed_bytes = borsh::to_vec(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(Self {
+            data,
+            signature,
+            signed_bytes,
+        })
+    }
 }
 
 impl CrdsValue {
     pub fn new_signed(data: CrdsData, keypair: &Keypair) -> Self {
-        let serialized = borsh::to_vec(&data).expect("CrdsData serialization cannot fail");
-        let signature = keypair.sign(&serialized);
-        Self { data, signature }
+        let signed_bytes = borsh::to_vec(&data).expect("CrdsData serialization cannot fail");
+        let signature = keypair.sign(&signed_bytes);
+        Self {
+            data,
+            signature,
+            signed_bytes,
+        }
     }
 
+    /// Verify the signature against the provided pubkey.
+    ///
+    /// For ContactInfo values, also enforces that `identity() == hash(pubkey)`,
+    /// binding the identity to the signing key and closing the C1 identity-hijack
+    /// vector.
     pub fn verify(&self, pubkey: &PublicKey) -> bool {
-        let serialized = match borsh::to_vec(&self.data) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        };
-        self.signature.verify(pubkey, &serialized).is_ok()
+        if let CrdsData::ContactInfo(ci) = &self.data {
+            let expected_identity = nusantara_crypto::hash(pubkey.as_bytes());
+            if ci.identity() != expected_identity {
+                return false;
+            }
+        }
+        self.signature.verify(pubkey, &self.signed_bytes).is_ok()
     }
 
     pub fn label(&self) -> CrdsValueLabel {
         match &self.data {
-            CrdsData::ContactInfo(ci) => CrdsValueLabel::ContactInfo(ci.identity),
+            CrdsData::ContactInfo(ci) => CrdsValueLabel::ContactInfo(ci.identity()),
             CrdsData::Vote(v) => CrdsValueLabel::Vote(v.from, v.slot),
             CrdsData::EpochSlots(es) => CrdsValueLabel::EpochSlots(es.from),
             CrdsData::LowestSlot(ls) => CrdsValueLabel::LowestSlot(ls.from),
@@ -48,7 +85,7 @@ impl CrdsValue {
 
     pub fn origin(&self) -> Hash {
         match &self.data {
-            CrdsData::ContactInfo(ci) => ci.identity,
+            CrdsData::ContactInfo(ci) => ci.identity(),
             CrdsData::Vote(v) => v.from,
             CrdsData::EpochSlots(es) => es.from,
             CrdsData::LowestSlot(ls) => ls.from,
@@ -140,10 +177,8 @@ impl fmt::Display for CrdsValueLabel {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sign_and_verify() {
-        let kp = Keypair::generate();
-        let ci = ContactInfo::new(
+    fn make_contact_info(kp: &Keypair) -> ContactInfo {
+        ContactInfo::new(
             kp.public_key().clone(),
             "127.0.0.1:8000".parse().unwrap(),
             "127.0.0.1:8003".parse().unwrap(),
@@ -152,7 +187,13 @@ mod tests {
             "127.0.0.1:8002".parse().unwrap(),
             1,
             1000,
-        );
+        )
+    }
+
+    #[test]
+    fn sign_and_verify() {
+        let kp = Keypair::generate();
+        let ci = make_contact_info(&kp);
         let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
         assert!(value.verify(kp.public_key()));
     }
@@ -161,34 +202,28 @@ mod tests {
     fn wrong_key_fails_verify() {
         let kp1 = Keypair::generate();
         let kp2 = Keypair::generate();
-        let ci = ContactInfo::new(
-            kp1.public_key().clone(),
-            "127.0.0.1:8000".parse().unwrap(),
-            "127.0.0.1:8003".parse().unwrap(),
-            "127.0.0.1:8004".parse().unwrap(),
-            "127.0.0.1:8001".parse().unwrap(),
-            "127.0.0.1:8002".parse().unwrap(),
-            1,
-            1000,
-        );
+        let ci = make_contact_info(&kp1);
         let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp1);
         assert!(!value.verify(kp2.public_key()));
+    }
+
+    #[test]
+    fn identity_hijack_rejected() {
+        let victim_kp = Keypair::generate();
+        let attacker_kp = Keypair::generate();
+
+        // Attacker crafts a ContactInfo with victim's pubkey but signs with own key.
+        // verify() must reject: identity() == hash(victim_pubkey) != hash(attacker_pubkey).
+        let ci = make_contact_info(&victim_kp);
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &attacker_kp);
+        assert!(!value.verify(attacker_kp.public_key()));
     }
 
     #[test]
     fn label_extraction() {
         let kp = Keypair::generate();
         let identity = kp.address();
-        let ci = ContactInfo::new(
-            kp.public_key().clone(),
-            "127.0.0.1:8000".parse().unwrap(),
-            "127.0.0.1:8003".parse().unwrap(),
-            "127.0.0.1:8004".parse().unwrap(),
-            "127.0.0.1:8001".parse().unwrap(),
-            "127.0.0.1:8002".parse().unwrap(),
-            1,
-            1000,
-        );
+        let ci = make_contact_info(&kp);
         let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
         assert_eq!(value.label(), CrdsValueLabel::ContactInfo(identity));
     }
@@ -196,19 +231,21 @@ mod tests {
     #[test]
     fn borsh_roundtrip() {
         let kp = Keypair::generate();
-        let ci = ContactInfo::new(
-            kp.public_key().clone(),
-            "127.0.0.1:8000".parse().unwrap(),
-            "127.0.0.1:8003".parse().unwrap(),
-            "127.0.0.1:8004".parse().unwrap(),
-            "127.0.0.1:8001".parse().unwrap(),
-            "127.0.0.1:8002".parse().unwrap(),
-            1,
-            1000,
-        );
+        let ci = make_contact_info(&kp);
         let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
         let bytes = borsh::to_vec(&value).unwrap();
         let decoded: CrdsValue = borsh::from_slice(&bytes).unwrap();
         assert_eq!(value, decoded);
+        assert!(decoded.verify(kp.public_key()));
+    }
+
+    #[test]
+    fn signed_bytes_consistent_after_roundtrip() {
+        let kp = Keypair::generate();
+        let ci = make_contact_info(&kp);
+        let value = CrdsValue::new_signed(CrdsData::ContactInfo(ci), &kp);
+        let bytes = borsh::to_vec(&value).unwrap();
+        let decoded: CrdsValue = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(value.signed_bytes, decoded.signed_bytes);
     }
 }
