@@ -161,6 +161,9 @@ impl ValidatorNode {
             .rollback_to_slot(plan.common_ancestor, &self.storage)
         {
             warn!(error = %e, "fork switch: bank rollback failed");
+            // Restore slot_hashes before recording failure so the bank remains
+            // consistent even though the rollback didn't complete.
+            self.restore_bank_slot_hashes();
             self.failed_fork_targets.insert(target);
             return;
         }

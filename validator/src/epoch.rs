@@ -17,55 +17,75 @@ impl ValidatorNode {
         let next_epoch = self.epoch_schedule.get_epoch(self.current_slot + 1);
 
         if next_epoch > current_epoch {
-            // 0. Collect rent from accounts (blocking I/O — offloaded)
-            {
-                let storage = Arc::clone(&self.storage);
-                let bank = Arc::clone(&self.bank);
+            // 0 + 1. Collect rent and distribute rewards concurrently — both are
+            // independent blocking I/O operations that read from storage but write
+            // to separate account sets. Running them in parallel via tokio::join!
+            // on two spawn_blocking tasks halves the wall-clock time at epoch boundaries.
+            let (rent_deltas, reward_deltas) = {
+                let storage_rent = Arc::clone(&self.storage);
+                let bank_rent = Arc::clone(&self.bank);
                 let rent = self.rent.clone();
                 let epoch_schedule = self.epoch_schedule.clone();
                 let current_slot = self.current_slot;
                 let epoch = current_epoch;
-                let rent_deltas = tokio::task::spawn_blocking(move || {
-                    collect_rent_blocking(
-                        &storage,
-                        &bank,
-                        &rent,
-                        &epoch_schedule,
-                        epoch,
-                        current_slot,
-                    )
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "rent collection task panicked");
-                    Vec::new()
-                });
-                if !rent_deltas.is_empty() {
-                    self.bank.update_state_tree(&rent_deltas);
-                }
+
+                let storage_reward = Arc::clone(&self.storage);
+                let bank_reward = Arc::clone(&self.bank);
+
+                tokio::join!(
+                    tokio::task::spawn_blocking(move || {
+                        collect_rent_blocking(
+                            &storage_rent,
+                            &bank_rent,
+                            &rent,
+                            &epoch_schedule,
+                            epoch,
+                            current_slot,
+                        )
+                    }),
+                    tokio::task::spawn_blocking(move || {
+                        distribute_epoch_rewards_blocking(
+                            &storage_reward,
+                            &bank_reward,
+                            epoch,
+                            current_slot,
+                        )
+                    })
+                )
+            };
+            let rent_deltas = rent_deltas.unwrap_or_else(|e| {
+                warn!(error = %e, "rent collection task panicked");
+                Vec::new()
+            });
+            let reward_deltas = reward_deltas.unwrap_or_else(|e| {
+                warn!(error = %e, "reward distribution task panicked");
+                Vec::new()
+            });
+            if !rent_deltas.is_empty() {
+                self.bank.update_state_tree(&rent_deltas);
+            }
+            if !reward_deltas.is_empty() {
+                self.bank.update_state_tree(&reward_deltas);
             }
 
-            // 1. Calculate and distribute rewards (blocking I/O — offloaded)
+            // 2. Stake transitions: the bank already marks delegations active at
+            // activation_epoch via set_stake_delegation. Cooldown removal is
+            // handled here: fully cooled-down delegations (deactivation_epoch + warmup
+            // period fully elapsed) are evicted from the in-memory bank.
             {
-                let storage = Arc::clone(&self.storage);
-                let bank = Arc::clone(&self.bank);
-                let current_slot = self.current_slot;
-                let epoch = current_epoch;
-                let reward_deltas = tokio::task::spawn_blocking(move || {
-                    distribute_epoch_rewards_blocking(&storage, &bank, epoch, current_slot)
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "reward distribution task panicked");
-                    Vec::new()
-                });
-                if !reward_deltas.is_empty() {
-                    self.bank.update_state_tree(&reward_deltas);
+                let delegations = self.bank.get_all_delegations();
+                let rate_bps = nusantara_stake_program::DEFAULT_WARMUP_COOLDOWN_RATE_BPS;
+                for (stake_account, delegation) in &delegations {
+                    if delegation.deactivation_epoch != u64::MAX {
+                        let epochs_deactivating =
+                            next_epoch.saturating_sub(delegation.deactivation_epoch);
+                        let cooldown_bps = epochs_deactivating.saturating_mul(rate_bps);
+                        if cooldown_bps >= 10_000 {
+                            self.bank.remove_stake_delegation(stake_account);
+                        }
+                    }
                 }
             }
-
-            // 2. Process stake transitions (multi-epoch warmup/cooldown)
-            self.process_stake_transitions(next_epoch);
 
             // 3. Update stake history sysvar
             let total_stake = self.bank.total_active_stake();
@@ -90,7 +110,7 @@ impl ValidatorNode {
             ) {
                 self.replay_stage
                     .cache_leader_schedule(next_epoch, schedule.clone());
-                self.leader_cache.write().insert(next_epoch, schedule);
+                self.leader_cache.lock().put(next_epoch, schedule);
             }
 
             info!(
@@ -162,23 +182,6 @@ impl ValidatorNode {
         });
     }
 
-    fn process_stake_transitions(&self, epoch: u64) {
-        let delegations = self.bank.get_all_delegations();
-        let rate_bps = nusantara_stake_program::DEFAULT_WARMUP_COOLDOWN_RATE_BPS;
-
-        for (stake_account, delegation) in &delegations {
-            // Remove fully cooled-down delegations (integer BPS arithmetic)
-            if delegation.deactivation_epoch != u64::MAX {
-                let epochs_deactivating = epoch.saturating_sub(delegation.deactivation_epoch);
-                let cooldown_bps = epochs_deactivating.saturating_mul(rate_bps);
-                if cooldown_bps >= 10_000 {
-                    // Fully cooled down — remove delegation from bank
-                    // The stake has been returned to the stake account via withdraw
-                    self.bank.remove_stake_delegation(stake_account);
-                }
-            }
-        }
-    }
 }
 
 /// Freestanding rent collection to run in a blocking thread.

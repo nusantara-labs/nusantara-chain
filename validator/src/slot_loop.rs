@@ -16,6 +16,7 @@ use nusantara_turbine::{BroadcastStage, TurbineTree};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::block_producer::PendingBlockStorage;
 use crate::cli::Cli;
 use crate::constants::{CATCHUP_THRESHOLD, GOSSIP_REPORT_INTERVAL, LEDGER_PRUNE_INTERVAL};
 use crate::error::ValidatorError;
@@ -45,7 +46,13 @@ impl ValidatorNode {
                 Some(result) = service_tasks.join_next() => {
                     match result {
                         Ok(name) => {
-                            tracing::error!(service = name, "service exited unexpectedly");
+                            // If shutdown was already requested (ctrl_c path), services
+                            // exit cleanly — log at info, not error, to avoid false alarm.
+                            if *shutdown_tx.borrow() {
+                                tracing::info!(service = name, "service stopped");
+                            } else {
+                                tracing::error!(service = name, "service exited unexpectedly");
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "service task panicked");
@@ -154,7 +161,7 @@ impl ValidatorNode {
                     // slots even if no orphans have triggered repair yet.
                     // This bootstraps the repair pipeline for fresh containers.
                     if catching_up {
-                        self.request_missing_slots(0);
+                        self.request_missing_slots();
                     }
 
                     self.submit_vote(self.current_slot);
@@ -205,20 +212,21 @@ impl ValidatorNode {
 
     pub(crate) fn am_i_leader(&self, slot: u64) -> bool {
         let epoch = self.epoch_schedule.get_epoch(slot);
+        let mut cache = self.leader_cache.lock();
 
-        // Ensure schedule is cached
-        if !self.leader_cache.read().contains_key(&epoch) {
+        // Populate cache on miss — one lock acquisition covers both the check
+        // and the potential insert (LRU requires &mut for reads too).
+        if !cache.contains(&epoch) {
             let stakes = self.bank.get_stake_distribution();
-            if let Ok(schedule) =
-                self.leader_schedule_generator
-                    .compute_schedule(epoch, &stakes, &self.genesis_hash)
+            if let Ok(schedule) = self
+                .leader_schedule_generator
+                .compute_schedule(epoch, &stakes, &self.genesis_hash)
             {
-                self.leader_cache.write().insert(epoch, schedule);
+                cache.put(epoch, schedule);
             }
         }
 
-        self.leader_cache
-            .read()
+        cache
             .get(&epoch)
             .and_then(|s| s.get_leader(slot, &self.epoch_schedule))
             .map(|leader| *leader == self.identity)
@@ -312,7 +320,7 @@ impl ValidatorNode {
         //     pruned ancestry (often just 1 entry on a single-node validator), causing
         //     all transactions with a recent blockhash to fail with BlockhashNotFound.
         let parent_slot = self.block_producer.parent_slot();
-        let is_linear_extension = self.last_produced_parent == Some(parent_slot);
+        let is_linear_extension = self.last_produced_slot == Some(parent_slot);
         let ancestry = self.replay_stage.fork_tree().get_ancestry(parent_slot);
         if !is_linear_extension {
             let fork_slot_hashes: Vec<(u64, Hash)> = ancestry
@@ -359,12 +367,14 @@ impl ValidatorNode {
         //    blocking thread so RocksDB I/O doesn't stall the async slot loop.
         //    The result is awaited so write failures are detected and broadcast
         //    is skipped on error (preventing silent data loss).
+        //    pending_storage is moved (not cloned) into the closure to avoid
+        //    copying the FrozenBankState and SlotMeta allocations.
         let storage_write_ok = {
             let storage = self.storage.clone();
             let block_for_storage = Arc::clone(&block);
             let slot = self.current_slot;
-            let frozen = pending_storage.frozen.clone();
-            let sm = pending_storage.slot_meta.clone();
+            // Move pending_storage into the closure; all fields are accessed there.
+            let PendingBlockStorage { frozen, slot_meta: sm } = pending_storage;
             tokio::task::spawn_blocking(move || -> Result<(), nusantara_storage::StorageError> {
                 let mut batch = StorageWriteBatch::new();
 
@@ -431,7 +441,7 @@ impl ValidatorNode {
         // 7. Publish pubsub events immediately after replay (before broadcast)
         //    so that send-and-confirm / airdrop-and-confirm endpoints get notified
         //    without waiting for Turbine shredding and network I/O.
-        let root = self.storage.get_latest_root().unwrap_or(None).unwrap_or(0);
+        let root = self.storage.get_latest_root().ok().flatten().unwrap_or(0);
         if let Err(e) = self.pubsub_tx.send(PubsubEvent::SlotUpdate {
             slot: self.current_slot,
             parent: block.header.parent_slot,
@@ -492,7 +502,7 @@ impl ValidatorNode {
         }
 
         // Track parent for linear-extension detection (skip rewind next slot)
-        self.last_produced_parent = Some(self.current_slot);
+        self.last_produced_slot = Some(self.current_slot);
 
         metrics::counter!("nusantara_leader_slots").increment(1);
         info!(

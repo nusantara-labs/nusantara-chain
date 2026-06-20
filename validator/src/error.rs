@@ -38,6 +38,9 @@ pub enum ValidatorError {
     #[error("keypair error: {0}")]
     Keypair(String),
 
+    #[error("genesis hash in storage is corrupted or wrong length")]
+    InvalidGenesisHash,
+
     #[error("network initialization failed: {0}")]
     NetworkInit(String),
 

@@ -170,10 +170,27 @@ pub fn replay_block_full(
     bank.record_slot_hash(slot, block.header.block_hash);
 
     // 14. Feed through ReplayStage for fork tree / Tower / commitment processing.
-    //     parent_poh is the PoH tip of the parent block, used as the initial hash
-    //     for verifying poh_entries. Fetched from storage so the verification is
-    //     correct when poh_entries is non-empty (full PoH replay path).
-    //     Falls back to Hash::zero() for genesis (slot 0 has no parent block).
+    //
+    // SECURITY: poh_entries is passed as empty (&[]) here, which causes
+    // replay_block to skip PoH chain verification entirely (the check is
+    // `if !poh_entries.is_empty()`). This is intentional for the current
+    // protocol: blocks are transmitted as shreds containing only the Block
+    // struct (header + transactions) without the PoH entry chain. Intra-slot
+    // PoH verification therefore cannot be performed on the receiver path.
+    //
+    // The block_hash = hashv(parent_hash, slot, poh_hash) check in step 10
+    // above provides a weaker but non-trivial binding: it ensures the poh_hash
+    // in the header matches the parent chain, preventing arbitrary injection
+    // but not replay of a block with a fabricated poh_hash (since poh_hash is
+    // computed locally by the leader and not independently verifiable without
+    // the entry chain).
+    //
+    // A full fix requires transmitting PohEntry chains alongside blocks (either
+    // via turbine or a separate PoH gossip channel) and is an upstream protocol
+    // change outside the scope of the validator crate alone.
+    //
+    // parent_poh is fetched from storage for the future when entry transmission
+    // is added; it is currently unused by replay_block when poh_entries is empty.
     let parent_poh = storage
         .get_block_header(parent_slot)
         .ok()

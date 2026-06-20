@@ -45,7 +45,10 @@ impl ValidatorNode {
         };
 
         let tx = build_vote_transaction(&self.keypair, &vote_account, vote, block_hash);
-        let _ = self.mempool.insert(tx); // best-effort
+        if let Err(e) = self.mempool.insert(tx) {
+            tracing::debug!(error = %e, slot, "vote tx rejected by mempool");
+            metrics::counter!("nusantara_vote_insert_failures").increment(1);
+        }
 
         self.last_voted_slot = slot;
 
@@ -73,9 +76,12 @@ impl ValidatorNode {
                     warn!(error = %e, "failed to store slash proof");
                 }
 
-                // Calculate penalty: 5% of validator's current effective stake
+                // Calculate penalty: 5% of validator's current effective stake.
+                // Use u128 arithmetic to avoid overflow when stake × BPS > u64::MAX.
                 let validator_stake = self.bank.get_validator_stake(&proof.validator);
-                let penalty = validator_stake * nusantara_consensus::SLASH_PENALTY_BPS / 10_000;
+                let penalty = ((validator_stake as u128)
+                    * (nusantara_consensus::SLASH_PENALTY_BPS as u128)
+                    / 10_000) as u64;
                 if penalty > 0 {
                     self.bank.apply_slash(&proof.validator, penalty);
                     info!(

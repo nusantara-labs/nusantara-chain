@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
+use std::num::NonZeroU64;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use borsh::BorshDeserialize;
 use nusantara_consensus::bank::ConsensusBank;
 use nusantara_consensus::commitment::CommitmentTracker;
 use nusantara_consensus::fork_choice::ForkTree;
@@ -146,7 +146,7 @@ impl ValidatorNode {
         let genesis_hash = Hash::new(
             genesis_hash_bytes
                 .try_into()
-                .map_err(|_| ValidatorError::Keypair("invalid genesis hash".to_string()))?,
+                .map_err(|_| ValidatorError::InvalidGenesisHash)?,
         );
 
         let parent_hash = storage.get_slot_hash(last_root)?.unwrap_or(genesis_hash);
@@ -173,41 +173,38 @@ impl ValidatorNode {
         }
 
         // 7-8. Load genesis validators and register in bank
-        let mut validators: Vec<GenesisValidatorInfo> = Vec::new();
-        if let Some(validators_data) = storage.get_cf(CF_DEFAULT, VALIDATORS_KEY)? {
-            validators = BorshDeserialize::deserialize(&mut validators_data.as_slice())
-                .map_err(|e| ValidatorError::Keypair(format!("failed to load validators: {e}")))?;
-
-            for v in &validators {
-                if let Some(vote_account) = storage.get_account(&v.vote_account)? {
-                    let vote_state: VoteState = BorshDeserialize::deserialize(
-                        &mut vote_account.data.as_slice(),
-                    )
-                    .map_err(|e| {
-                        ValidatorError::Keypair(format!("failed to deserialize vote state: {e}"))
-                    })?;
-                    bank.set_vote_state(v.vote_account, vote_state);
-                }
-
-                let delegation = Delegation {
-                    voter_pubkey: v.vote_account,
-                    stake: v.stake_lamports,
-                    activation_epoch: 0,
-                    deactivation_epoch: u64::MAX,
-                    warmup_cooldown_rate_bps:
-                        nusantara_stake_program::DEFAULT_WARMUP_COOLDOWN_RATE_BPS,
-                };
-                if let Err(e) = bank.set_stake_delegation(v.stake_account, delegation) {
-                    tracing::warn!(error = %e, stake_account = ?v.stake_account, "skipping invalid genesis delegation");
-                }
+        let validators: Vec<GenesisValidatorInfo> =
+            match storage.get_cf(CF_DEFAULT, VALIDATORS_KEY)? {
+                Some(data) => borsh::from_slice(&data).map_err(|e| {
+                    ValidatorError::Keypair(format!("failed to deserialize validators: {e}"))
+                })?,
+                None => Vec::new(),
+            };
+        for v in &validators {
+            if let Some(vote_account) = storage.get_account(&v.vote_account)? {
+                let vote_state: VoteState =
+                    borsh::from_slice(&vote_account.data).map_err(
+                        |e| ValidatorError::Keypair(format!("failed to deserialize vote state: {e}")),
+                    )?;
+                bank.set_vote_state(v.vote_account, vote_state);
             }
 
-            info!(
-                count = validators.len(),
-                "loaded genesis validators into bank"
-            );
-        } else {
+            let delegation = Delegation {
+                voter_pubkey: v.vote_account,
+                stake: v.stake_lamports,
+                activation_epoch: 0,
+                deactivation_epoch: u64::MAX,
+                warmup_cooldown_rate_bps: nusantara_stake_program::DEFAULT_WARMUP_COOLDOWN_RATE_BPS,
+            };
+            if let Err(e) = bank.set_stake_delegation(v.stake_account, delegation) {
+                tracing::warn!(error = %e, stake_account = ?v.stake_account, "skipping invalid genesis delegation");
+            }
+        }
+
+        if validators.is_empty() {
             warn!("no validator info found in storage");
+        } else {
+            info!(count = validators.len(), "loaded genesis validators into bank");
         }
 
         // 9. Recalculate epoch stakes
@@ -227,8 +224,13 @@ impl ValidatorNode {
         );
         bank.set_state_tree(state_tree);
 
-        // 10. Create SlotClock
-        let slot_clock = SlotClock::new(clock.epoch_start_timestamp, DEFAULT_SLOT_DURATION_MS);
+        // 10. Create SlotClock — NonZeroU64 enforces slot_duration_ms > 0 at the
+        // type level, eliminating the divide-by-zero risk in current_slot().
+        let slot_clock = SlotClock::new(
+            clock.epoch_start_timestamp,
+            NonZeroU64::new(DEFAULT_SLOT_DURATION_MS)
+                .expect("DEFAULT_SLOT_DURATION_MS must be non-zero"),
+        );
         let current_slot = slot_clock.current_slot().max(last_root + 1);
 
         // 11. Create ProgramCache
@@ -368,8 +370,13 @@ impl ValidatorNode {
             gpu_verifier,
         );
 
-        // 17. Compute initial leader schedule
-        let leader_cache: SharedLeaderCache = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+        // 17. Compute initial leader schedule — LRU cache bounded to LEADER_CACHE_CAPACITY epochs.
+        let leader_cache: SharedLeaderCache = Arc::new(parking_lot::Mutex::new(
+            lru::LruCache::new(
+                std::num::NonZeroUsize::new(crate::constants::LEADER_CACHE_CAPACITY)
+                    .expect("LEADER_CACHE_CAPACITY must be non-zero"),
+            ),
+        ));
         let leader_schedule_generator = LeaderScheduleGenerator::new(epoch_schedule.clone());
 
         let stakes = bank.get_stake_distribution();
@@ -377,7 +384,7 @@ impl ValidatorNode {
             leader_schedule_generator.compute_schedule(current_epoch, &stakes, &genesis_hash)
         {
             replay_stage.cache_leader_schedule(current_epoch, schedule.clone());
-            leader_cache.write().insert(current_epoch, schedule);
+            leader_cache.lock().put(current_epoch, schedule);
             info!(epoch = current_epoch, "initial leader schedule computed");
         }
 
@@ -425,7 +432,6 @@ impl ValidatorNode {
             turbine_addr,
             repair_addr,
             tpu_addr,
-            tpu_forward_addr,
             consecutive_skips: Arc::new(AtomicU64::new(0)),
             total_skips: 0,
             replay_tip_shared: Arc::new(AtomicU64::new(last_root)),
@@ -440,7 +446,7 @@ impl ValidatorNode {
             snapshot_dir: Path::new(&cli.ledger_path).join("snapshots"),
             failed_fork_targets: HashSet::new(),
             last_voted_slot: current_slot,
-            last_produced_parent: None,
+            last_produced_slot: None,
             last_fork_switch_target: None,
             max_txs_per_slot: cli.max_txs_per_slot,
         })

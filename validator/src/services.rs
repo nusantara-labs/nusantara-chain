@@ -74,7 +74,26 @@ impl ValidatorNode {
         // Channels
         let (shred_tx, shred_rx) = mpsc::channel(10_000);
         let repair_shred_tx = shred_tx.clone();
-        let (repair_msg_tx, _repair_msg_rx) = mpsc::channel(1_000);
+        // repair_msg_tx is required by ShredReceiver's API — it delivers inbound
+        // RepairRequest messages that arrive on the turbine socket. The validator
+        // handles repair via spawn_repair_responder on the dedicated repair socket.
+        // We spawn a bounded drain task so the channel never fills and senders never
+        // see a closed-channel error; inbound turbine-path repair requests are counted.
+        let (repair_msg_tx, mut repair_msg_rx) =
+            mpsc::channel::<(TurbineMessage, SocketAddr)>(1_000);
+        let mut repair_drain_shutdown = shutdown_rx.clone();
+        service_tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = repair_drain_shutdown.changed() => break,
+                    Some(_msg) = repair_msg_rx.recv() => {
+                        metrics::counter!("nusantara_turbine_repair_requests_drained").increment(1);
+                    }
+                }
+            }
+            "repair_drain"
+        });
         let (block_tx, block_rx) = mpsc::channel(1_000);
 
         // 3a. ShredReceiver
@@ -105,7 +124,7 @@ impl ValidatorNode {
         let tree_identity = self.identity;
         let tree_provider = move |slot: u64| -> Option<TurbineTree> {
             let epoch = tree_epoch_schedule.get_epoch(slot);
-            let cache = tree_leader_cache.read();
+            let mut cache = tree_leader_cache.lock();
             let leader = *cache.get(&epoch)?.get_leader(slot, &tree_epoch_schedule)?;
             let mut peers: Vec<Hash> = tree_cluster_info
                 .all_peers()
@@ -176,13 +195,15 @@ impl ValidatorNode {
             "repair"
         });
 
-        // 3d. Repair responder
+        // 3d. Repair responder — pushes its handle into service_tasks so unexpected
+        // exits are detected and trigger a clean shutdown like any other service.
         spawn_repair_responder(
             Arc::clone(&repair_socket),
             Arc::clone(&self.storage),
             Arc::clone(&self.keypair),
             repair_shred_tx,
             shutdown_rx.clone(),
+            &mut service_tasks,
         );
         info!("turbine pipeline started");
 
@@ -235,7 +256,7 @@ impl ValidatorNode {
         let leader_lookup = move || -> Option<(Hash, SocketAddr)> {
             let slot = tpu_current_slot.load(Ordering::Relaxed);
             let epoch = tpu_epoch_schedule.get_epoch(slot);
-            let cache = tpu_leader_cache.read();
+            let mut cache = tpu_leader_cache.lock();
             let leader = cache.get(&epoch)?.get_leader(slot, &tpu_epoch_schedule)?;
             let addr = tpu_cluster_info
                 .get_contact_info(leader)?
@@ -346,15 +367,25 @@ impl ValidatorNode {
     }
 }
 
-/// Standalone repair responder task.
+/// Spawn the repair responder task into `service_tasks` so unexpected exits
+/// are detected and trigger a clean shutdown via the JoinSet monitor.
+///
+/// Design:
+/// - `biased` select with shutdown FIRST ensures the loop exits promptly on
+///   shutdown even under a flood of inbound repair packets.
+/// - The blocking RocksDB read + re-shredding is offloaded via `tokio::spawn`
+///   (not awaited inline), so the recv loop keeps draining the socket without
+///   blocking for the duration of a full block fetch. Responses are sent from
+///   within the spawned task.
 fn spawn_repair_responder(
     socket: Arc<UdpSocket>,
     storage: Arc<nusantara_storage::Storage>,
     keypair: Arc<nusantara_crypto::Keypair>,
     shred_tx: mpsc::Sender<(TurbineMessage, SocketAddr)>,
     mut shutdown_rx: watch::Receiver<bool>,
+    service_tasks: &mut JoinSet<&'static str>,
 ) {
-    tokio::spawn(async move {
+    service_tasks.spawn(async move {
         let mut buf = vec![0u8; MAX_UDP_PACKET];
         let shred_cache: Arc<
             parking_lot::Mutex<lru::LruCache<u64, Arc<nusantara_turbine::ShredBatch>>>,
@@ -366,7 +397,12 @@ fn spawn_repair_responder(
         // misses, and a stale negative cache would block all future responses.
         loop {
             tokio::select! {
+                // Shutdown branch is checked first (biased) so a flooded repair
+                // socket cannot prevent clean shutdown.
                 biased;
+                _ = shutdown_rx.changed() => {
+                    break;
+                }
                 result = socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, src)) => {
@@ -384,12 +420,19 @@ fn spawn_repair_responder(
                                     };
                                     tracing::debug!(slot, ?request, %src, "received repair request");
 
-                                    // Check LRU cache first, then fetch + re-shred on miss.
-                                    // Lock scope is kept tight to avoid holding across .await.
+                                    // Check LRU cache first. Lock scope is tight — never
+                                    // held across the spawn boundary below.
                                     let cached = shred_cache.lock().get(&slot).cloned();
-                                    let shred_batch = if let Some(batch) = cached {
+                                    if let Some(shred_batch) = cached {
                                         metrics::counter!("nusantara_turbine_repair_cache_hits").increment(1);
-                                        batch
+                                        // Respond inline — data already in memory, no blocking I/O.
+                                        let socket2 = Arc::clone(&socket);
+                                        tokio::spawn(async move {
+                                            send_repair_response(
+                                                &socket2, src, slot, &request, &shred_batch,
+                                            )
+                                            .await;
+                                        });
                                     } else {
                                         // Fast pre-check: skip spawn_blocking if block header
                                         // doesn't exist. This is a cheap RocksDB key-exists
@@ -398,127 +441,35 @@ fn spawn_repair_responder(
                                         if !storage.has_block_header(slot).unwrap_or(false) {
                                             continue;
                                         }
-                                        // Offload blocking RocksDB read + re-shredding to
-                                        // spawn_blocking (the full block deserialization and
-                                        // shredding are expensive).
+                                        // Offload blocking RocksDB read + re-shredding to a
+                                        // separate task so this recv loop keeps draining the
+                                        // socket without waiting for disk I/O.
                                         let storage_clone = storage.clone();
                                         let keypair_clone = Arc::clone(&keypair);
-                                        let result = tokio::task::spawn_blocking(move || {
-                                            let block = storage_clone.get_block(slot).ok()??;
-                                            let batch = Shredder::shred_block(
-                                                &block,
-                                                block.header.parent_slot,
-                                                &keypair_clone,
-                                            ).ok()?;
-                                            Some(Arc::new(batch))
-                                        }).await;
-                                        let batch = match result {
-                                            Ok(Some(b)) => b,
-                                            _ => continue,
-                                        };
-                                        shred_cache.lock().put(slot, Arc::clone(&batch));
-                                        metrics::counter!("nusantara_turbine_repair_cache_misses").increment(1);
-                                        batch
-                                    };
-                                    match request {
-                                        RepairRequest::Shred { index, .. } => {
-                                            if let Some(shred) =
-                                                shred_batch.data_shreds.get(index as usize)
-                                            {
-                                                let msg = TurbineMessage::RepairResponse(
-                                                    MerkleShred::Data(shred.clone()),
-                                                );
-                                                if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                    let _ = socket
-                                                        .send_to(&bytes, src)
-                                                        .await;
-                                                }
+                                        let cache_clone = Arc::clone(&shred_cache);
+                                        let socket2 = Arc::clone(&socket);
+                                        tokio::spawn(async move {
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                let block = storage_clone.get_block(slot).ok()??;
+                                                let batch = Shredder::shred_block(
+                                                    &block,
+                                                    block.header.parent_slot,
+                                                    &keypair_clone,
+                                                )
+                                                .ok()?;
+                                                Some(Arc::new(batch))
+                                            })
+                                            .await;
+                                            if let Ok(Some(batch)) = result {
+                                                cache_clone.lock().put(slot, Arc::clone(&batch));
+                                                metrics::counter!("nusantara_turbine_repair_cache_misses").increment(1);
+                                                send_repair_response(
+                                                    &socket2, src, slot, &request, &batch,
+                                                )
+                                                .await;
                                             }
-                                        }
-                                        RepairRequest::ShredBatch { ref indices, .. } => {
-                                            if indices.len() > MAX_REPAIR_BATCH_REQUEST as usize {
-                                                tracing::warn!(
-                                                    %slot,
-                                                    count = indices.len(),
-                                                    "repair request too large, dropping"
-                                                );
-                                                continue;
-                                            }
-                                            let shreds: Vec<MerkleShred> = indices
-                                                .iter()
-                                                .filter_map(|&i| {
-                                                    shred_batch
-                                                        .data_shreds
-                                                        .get(i as usize)
-                                                        .map(|s| MerkleShred::Data(s.clone()))
-                                                })
-                                                .collect();
-                                            if let Ok(batches) = BatchRepairResponse::pack(
-                                                slot,
-                                                shreds,
-                                                MAX_UDP_PACKET,
-                                            ) {
-                                                for batch in batches {
-                                                    let msg = TurbineMessage::BatchRepairResponse(
-                                                        batch,
-                                                    );
-                                                    if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                        let _ = socket
-                                                            .send_to(&bytes, src)
-                                                            .await;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        RepairRequest::BatchHeader { .. } => {
-                                            let msg = TurbineMessage::ShredBatchHeader(
-                                                shred_batch.header.clone(),
-                                            );
-                                            if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                let _ = socket
-                                                    .send_to(&bytes, src)
-                                                    .await;
-                                            }
-                                        }
-                                        RepairRequest::HighestShred { .. }
-                                        | RepairRequest::Orphan { .. } => {
-                                            if let Some(last_shred) =
-                                                shred_batch.data_shreds.last()
-                                            {
-                                                let msg = TurbineMessage::RepairResponse(
-                                                    MerkleShred::Data(last_shred.clone()),
-                                                );
-                                                if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                    let _ = socket
-                                                        .send_to(&bytes, src)
-                                                        .await;
-                                                }
-                                            }
-                                            let shreds: Vec<MerkleShred> = shred_batch
-                                                .data_shreds
-                                                .iter()
-                                                .map(|s| MerkleShred::Data(s.clone()))
-                                                .collect();
-                                            if let Ok(batches) = BatchRepairResponse::pack(
-                                                slot,
-                                                shreds,
-                                                MAX_UDP_PACKET,
-                                            ) {
-                                                for batch in batches {
-                                                    let msg = TurbineMessage::BatchRepairResponse(
-                                                        batch,
-                                                    );
-                                                    if let Ok(bytes) = msg.serialize_to_bytes() {
-                                                        let _ = socket
-                                                            .send_to(&bytes, src)
-                                                            .await;
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        });
                                     }
-                                    metrics::counter!("nusantara_turbine_repair_responses_sent")
-                                        .increment(1);
                                 }
                                 Ok(TurbineMessage::RepairResponse(shred)) => {
                                     tracing::debug!(
@@ -566,11 +517,88 @@ fn spawn_repair_responder(
                         }
                     }
                 }
-                _ = shutdown_rx.changed() => {
-                    break;
-                }
             }
         }
         info!("repair responder stopped");
+        "repair_responder"
     });
+}
+
+/// Send a repair response for the given request, using data from `shred_batch`.
+///
+/// Extracted as a free function so it can be called from both the inline
+/// (cache-hit) and spawned (cache-miss) paths without duplicating logic.
+async fn send_repair_response(
+    socket: &UdpSocket,
+    src: SocketAddr,
+    slot: u64,
+    request: &RepairRequest,
+    shred_batch: &nusantara_turbine::ShredBatch,
+) {
+    match request {
+        RepairRequest::Shred { index, .. } => {
+            if let Some(shred) = shred_batch.data_shreds.get(*index as usize) {
+                let msg = TurbineMessage::RepairResponse(MerkleShred::Data(shred.clone()));
+                if let Ok(bytes) = msg.serialize_to_bytes() {
+                    let _ = socket.send_to(&bytes, src).await;
+                }
+            }
+        }
+        RepairRequest::ShredBatch { indices, .. } => {
+            if indices.len() > MAX_REPAIR_BATCH_REQUEST as usize {
+                tracing::warn!(
+                    slot,
+                    count = indices.len(),
+                    "repair request too large, dropping"
+                );
+                return;
+            }
+            let shreds: Vec<MerkleShred> = indices
+                .iter()
+                .filter_map(|&i| {
+                    shred_batch
+                        .data_shreds
+                        .get(i as usize)
+                        .map(|s| MerkleShred::Data(s.clone()))
+                })
+                .collect();
+            if let Ok(batches) = BatchRepairResponse::pack(slot, shreds, MAX_UDP_PACKET) {
+                for batch in batches {
+                    let msg = TurbineMessage::BatchRepairResponse(batch);
+                    if let Ok(bytes) = msg.serialize_to_bytes() {
+                        let _ = socket.send_to(&bytes, src).await;
+                    }
+                }
+            }
+        }
+        RepairRequest::BatchHeader { .. } => {
+            let msg = TurbineMessage::ShredBatchHeader(shred_batch.header.clone());
+            if let Ok(bytes) = msg.serialize_to_bytes() {
+                let _ = socket.send_to(&bytes, src).await;
+            }
+        }
+        RepairRequest::HighestShred { .. } | RepairRequest::Orphan { .. } => {
+            if let Some(last_shred) = shred_batch.data_shreds.last() {
+                let msg =
+                    TurbineMessage::RepairResponse(MerkleShred::Data(last_shred.clone()));
+                if let Ok(bytes) = msg.serialize_to_bytes() {
+                    let _ = socket.send_to(&bytes, src).await;
+                }
+            }
+            let shreds: Vec<MerkleShred> = shred_batch
+                .data_shreds
+                .iter()
+                .map(|s| MerkleShred::Data(s.clone()))
+                .collect();
+            if let Ok(batches) = BatchRepairResponse::pack(slot, shreds, MAX_UDP_PACKET) {
+                for batch in batches {
+                    let msg = TurbineMessage::BatchRepairResponse(batch);
+                    if let Ok(bytes) = msg.serialize_to_bytes() {
+                        let _ = socket.send_to(&bytes, src).await;
+                    }
+                }
+            }
+        }
+    }
+    metrics::counter!("nusantara_turbine_repair_responses_sent").increment(1);
 }

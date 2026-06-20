@@ -61,8 +61,6 @@ pub struct ValidatorNode {
     pub(crate) turbine_addr: SocketAddr,
     pub(crate) repair_addr: SocketAddr,
     pub(crate) tpu_addr: SocketAddr,
-    #[allow(dead_code)]
-    pub(crate) tpu_forward_addr: SocketAddr,
 
     // Skip tracking (F1/F5)
     pub(crate) consecutive_skips: Arc<AtomicU64>,
@@ -105,10 +103,10 @@ pub struct ValidatorNode {
     // Last slot we submitted a vote for (used to batch unvoted slots)
     pub(crate) last_voted_slot: u64,
 
-    // Parent slot used in the last leader block production.
-    // When `Some(parent)` and the new parent == parent + 1 (linear extension),
-    // we skip the expensive account index rewind (no fork switch occurred).
-    pub(crate) last_produced_parent: Option<u64>,
+    // Last slot we produced as leader. When `Some(slot)` and the next
+    // production's parent == slot (linear extension), we skip the expensive
+    // account index rewind because no fork switch occurred.
+    pub(crate) last_produced_slot: Option<u64>,
 
     // Dedup: skip fork switch if the target is the same as last attempt.
     // Reset to None when root advances (fork landscape genuinely changes).
@@ -123,10 +121,5 @@ impl ValidatorNode {
     pub fn flush_storage(&self) -> Result<(), ValidatorError> {
         self.storage.flush_all()?;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn mempool(&self) -> Arc<Mempool> {
-        Arc::clone(&self.mempool)
     }
 }

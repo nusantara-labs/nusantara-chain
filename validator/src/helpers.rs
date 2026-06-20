@@ -20,7 +20,6 @@ pub(crate) fn unix_timestamp_secs() -> i64 {
 }
 
 /// Current Unix timestamp in milliseconds (u64).
-#[allow(dead_code)]
 pub(crate) fn unix_timestamp_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

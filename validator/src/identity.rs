@@ -8,7 +8,7 @@ use crate::constants::KEYPAIR_SIZE;
 use crate::error::ValidatorError;
 
 /// Write keypair bytes to a file with restricted permissions (0o600 on Unix).
-fn write_keypair_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_keypair_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;

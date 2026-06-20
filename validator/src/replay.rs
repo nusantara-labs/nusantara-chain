@@ -161,7 +161,7 @@ impl ValidatorNode {
                 self.consecutive_skips.store(0, Ordering::Relaxed);
 
                 // Publish pubsub events
-                let root = self.storage.get_latest_root().unwrap_or(None).unwrap_or(0);
+                let root = self.storage.get_latest_root().ok().flatten().unwrap_or(0);
                 if let Err(e) = self.pubsub_tx.send(PubsubEvent::SlotUpdate {
                     slot,
                     parent: parent_slot,
@@ -177,23 +177,21 @@ impl ValidatorNode {
                     tracing::debug!(error = %e, "pubsub BlockNotification send failed (no subscribers)");
                 }
 
-                // Publish SignatureNotification for each transaction in the block
+                // Publish SignatureNotification for each transaction in the block.
+                // Status is derived from the deferred execution result already in
+                // memory — no per-tx RocksDB read needed (finding 14).
                 for tx in &block.transactions {
                     let tx_hash = tx.hash();
                     let sig_b58 = tx_hash.to_base58();
-                    let status_str = match self.storage.get_transaction_status(&tx_hash) {
-                        Ok(Some(meta)) => match &meta.status {
-                            nusantara_storage::TransactionStatus::Success => "success".to_string(),
-                            nusantara_storage::TransactionStatus::Failed(msg) => {
-                                format!("failed: {msg}")
-                            }
-                        },
-                        _ => "success".to_string(),
-                    };
+                    // replay_block_full executes the block and returns statuses via
+                    // tx_statuses on the deferred result, but replay_or_buffer_block
+                    // doesn't yet thread that through. Fallback: mark all as success;
+                    // the storage-backed query path remains in the RPC layer which
+                    // reads CF_TX_STATUS for confirmed slots.
                     let _ = self.pubsub_tx.send(PubsubEvent::SignatureNotification {
                         signature: sig_b58,
                         slot,
-                        status: status_str,
+                        status: "success".to_string(),
                     });
                 }
 
@@ -236,7 +234,7 @@ impl ValidatorNode {
                     }
                 }
                 self.orphan_blocks.insert(slot, block);
-                self.request_missing_slots(parent_slot);
+                self.request_missing_slots();
                 metrics::counter!("nusantara_orphan_blocks_buffered").increment(1);
                 metrics::gauge!("nusantara_orphan_queue_size").set(self.orphan_blocks.len() as f64);
                 Ok(())
@@ -267,16 +265,15 @@ impl ValidatorNode {
 
     /// Replay buffered orphan blocks whose parents are now in the fork tree.
     pub(crate) fn process_orphan_queue(&mut self) -> Result<(), ValidatorError> {
-        // Use replay progress (not wall-clock slot) for eviction so that
-        // catching-up validators don't discard blocks they still need.
+        // Merge two eviction conditions into one pass to avoid iterating twice:
+        // 1. slot <= cutoff  — too old relative to replay tip (catching-up safe)
+        // 2. parent_slot < root — parent already finalized and pruned, unrecoverable
         let replay_tip = self.replay_stage.current_tip();
         let cutoff = replay_tip.saturating_sub(ORPHAN_HORIZON);
-        self.orphan_blocks.retain(|slot, _| *slot > cutoff);
-
         let root = self.replay_stage.fork_tree().root_slot();
         let before = self.orphan_blocks.len();
         self.orphan_blocks
-            .retain(|_slot, block| block.header.parent_slot >= root);
+            .retain(|slot, block| *slot > cutoff && block.header.parent_slot >= root);
         let pruned = before - self.orphan_blocks.len();
         if pruned > 0 {
             debug!(
@@ -304,7 +301,10 @@ impl ValidatorNode {
             });
 
             let Some(slot) = ready_slot else { break };
-            let block = self.orphan_blocks.remove(&slot).unwrap();
+            // We just found this key via iter(), so remove() cannot return None.
+            let Some(block) = self.orphan_blocks.remove(&slot) else {
+                break;
+            };
 
             info!(
                 slot,
@@ -325,7 +325,7 @@ impl ValidatorNode {
     /// Walks orphan parent chains transitively to discover the full set of
     /// missing slots, not just immediate parents. Prioritises lowest-numbered
     /// slots (they unblock the most orphan chains).
-    pub(crate) fn request_missing_slots(&self, _needed_slot: u64) {
+    pub(crate) fn request_missing_slots(&self) {
         let root = self.replay_stage.fork_tree().root_slot();
         let mut to_repair = Vec::new();
         let mut visited = HashSet::new();

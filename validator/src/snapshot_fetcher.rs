@@ -5,6 +5,7 @@
 //! to the local snapshots directory so the normal boot path can restore
 //! from it.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
@@ -14,27 +15,50 @@ use tracing::{info, warn};
 
 use crate::error::ValidatorError;
 
+/// Hard cap on streaming download size regardless of reported file_size.
+/// 64 GiB is generous enough for any realistic snapshot while bounding
+/// memory/disk abuse from a malicious or misconfigured entrypoint.
+const MAX_SNAPSHOT_SIZE: u64 = 64 * 1024 * 1024 * 1024;
+
 /// Metadata returned by the `/v1/snapshot/latest` endpoint on entrypoints.
 #[derive(Debug, serde::Deserialize)]
 struct SnapshotInfo {
     slot: u64,
-    #[allow(dead_code)]
-    bank_hash: String,
-    #[allow(dead_code)]
-    account_count: u64,
-    #[allow(dead_code)]
-    timestamp: i64,
     file_hash: Option<String>,
-    #[allow(dead_code)]
     file_size: Option<u64>,
+}
+
+/// RAII guard that deletes the tmp file on drop unless `commit()` is called.
+struct TmpFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TmpFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Transfer ownership: caller is responsible for the file from here on.
+    fn commit(mut self) -> PathBuf {
+        self.path.take().expect("commit called twice")
+    }
+}
+
+impl Drop for TmpFileGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Attempt to fetch a snapshot from the given entrypoint RPC addresses.
 ///
 /// This function iterates through entrypoints (assumed to expose HTTP RPC on
 /// port 8899), queries each for its latest snapshot metadata, selects the
-/// snapshot with the highest slot, downloads the binary, verifies the hash,
-/// and saves it to `{snapshot_dir}/snapshot-{slot}.bin`.
+/// snapshot with the highest slot (sorted descending), then tries each in order
+/// until one succeeds. Both `file_hash` and `file_size` must be present in the
+/// metadata — snapshots missing either field are rejected.
 ///
 /// Returns `Ok(Some(path))` on success, `Ok(None)` if no entrypoint had a
 /// snapshot available, or `Err` on fatal errors.
@@ -49,13 +73,18 @@ pub async fn fetch_snapshot_from_entrypoints(
         return Ok(None);
     }
 
-    let client = reqwest::Client::builder()
+    // Short timeout for metadata GETs; long timeout for binary downloads.
+    let meta_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| ValidatorError::NetworkInit(format!("failed to create HTTP client: {e}")))?;
+    let download_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| ValidatorError::NetworkInit(format!("failed to create HTTP client: {e}")))?;
 
-    // 1. Query each entrypoint for snapshot metadata and pick the highest slot
-    let mut best: Option<(SnapshotInfo, String)> = None; // (info, rpc_base_url)
+    // 1. Query each entrypoint for snapshot metadata, collect all valid candidates.
+    let mut candidates: Vec<(SnapshotInfo, String)> = Vec::new(); // (info, rpc_base_url)
 
     for ep in entrypoints {
         // Entrypoints are gossip addresses (host:gossip_port).
@@ -63,18 +92,25 @@ pub async fn fetch_snapshot_from_entrypoints(
         let rpc_base = entrypoint_to_rpc_url(ep);
 
         let url = format!("{rpc_base}/v1/snapshot/latest");
-        match client.get(&url).send().await {
+        match meta_client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => match resp.json::<SnapshotInfo>().await {
                 Ok(info) => {
-                    let dominated = best.as_ref().is_some_and(|(b, _)| b.slot >= info.slot);
-                    if !dominated {
-                        info!(
+                    // Both file_hash and file_size must be present; reject snapshots
+                    // that omit either — we cannot safely download or verify them.
+                    if info.file_hash.is_none() || info.file_size.is_none() {
+                        warn!(
                             entrypoint = ep,
                             slot = info.slot,
-                            "found snapshot from entrypoint"
+                            "snapshot metadata missing file_hash or file_size — rejecting"
                         );
-                        best = Some((info, rpc_base));
+                        continue;
                     }
+                    info!(
+                        entrypoint = ep,
+                        slot = info.slot,
+                        "found snapshot from entrypoint"
+                    );
+                    candidates.push((info, rpc_base));
                 }
                 Err(e) => {
                     warn!(entrypoint = ep, error = %e, "failed to parse snapshot info");
@@ -93,96 +129,146 @@ pub async fn fetch_snapshot_from_entrypoints(
         }
     }
 
-    let Some((info, rpc_base)) = best else {
+    if candidates.is_empty() {
         info!("no snapshot available from any entrypoint");
-        return Ok(None);
-    };
-
-    // 2. Download the snapshot binary via streaming to avoid OOM on large snapshots
-    let download_url = format!("{rpc_base}/v1/snapshot/download");
-    info!(url = %download_url, slot = info.slot, "downloading snapshot");
-
-    let resp = client
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| ValidatorError::NetworkInit(format!("snapshot download failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        warn!(
-            status = %resp.status(),
-            "snapshot download returned non-success status"
-        );
         return Ok(None);
     }
 
-    // Stream response body to a temp file, hashing incrementally
+    // Sort descending by slot — try the freshest snapshot first.
+    candidates.sort_by_key(|c| Reverse(c.0.slot));
+
     tokio::fs::create_dir_all(snapshot_dir)
         .await
         .map_err(ValidatorError::Io)?;
 
-    let tmp_path = snapshot_dir.join(format!("snapshot-{}.bin.tmp", info.slot));
-    let mut tmp_file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(ValidatorError::Io)?;
+    // 2. Try each candidate in order; move on if download/verify fails.
+    for (info, rpc_base) in candidates {
+        // Both fields were verified present during collection.
+        let expected_hash = info.file_hash.as_deref().expect("checked above");
+        let file_size = info.file_size.expect("checked above");
+        // Apply absolute hard cap in case server reports an absurd file_size.
+        let size_cap = file_size.min(MAX_SNAPSHOT_SIZE);
 
-    let mut hasher = Hasher::default();
-    let mut total_bytes: u64 = 0;
-    let mut stream = resp.bytes_stream();
+        let download_url = format!("{rpc_base}/v1/snapshot/download");
+        info!(url = %download_url, slot = info.slot, "downloading snapshot");
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| {
-            ValidatorError::NetworkInit(format!("failed to read snapshot chunk: {e}"))
-        })?;
-        hasher.update(&chunk);
-        tmp_file
-            .write_all(&chunk)
-            .await
-            .map_err(ValidatorError::Io)?;
-        total_bytes += chunk.len() as u64;
-    }
-    tmp_file.flush().await.map_err(ValidatorError::Io)?;
-    drop(tmp_file);
+        let resp = match download_client.get(&download_url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                warn!(
+                    status = %r.status(),
+                    slot = info.slot,
+                    "snapshot download returned non-success status, trying next"
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, slot = info.slot, "snapshot download failed, trying next");
+                continue;
+            }
+        };
 
-    info!(
-        size_bytes = total_bytes,
-        slot = info.slot,
-        "snapshot downloaded"
-    );
+        // Stream response body to a temp file, hashing incrementally.
+        // TmpFileGuard removes the file on drop if we bail out early.
+        let tmp_path = snapshot_dir.join(format!("snapshot-{}.bin.tmp", info.slot));
+        let tmp_guard = TmpFileGuard::new(tmp_path.clone());
 
-    // 3. Verify SHA3-512 hash if provided
-    if let Some(ref expected_hash) = info.file_hash {
+        let mut tmp_file = match tokio::fs::File::create(&tmp_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(error = %e, "failed to create tmp snapshot file, trying next");
+                continue;
+            }
+        };
+
+        let mut hasher = Hasher::default();
+        let mut total_bytes: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        let mut size_exceeded = false;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "failed to read snapshot chunk, trying next");
+                    size_exceeded = true; // reuse flag to break out and skip
+                    break;
+                }
+            };
+            hasher.update(&chunk);
+            if let Err(e) = tmp_file.write_all(&chunk).await {
+                warn!(error = %e, "failed to write snapshot chunk, trying next");
+                size_exceeded = true;
+                break;
+            }
+            total_bytes += chunk.len() as u64;
+            if total_bytes > size_cap {
+                warn!(
+                    total_bytes,
+                    size_cap,
+                    slot = info.slot,
+                    "snapshot download exceeded size cap — aborting"
+                );
+                size_exceeded = true;
+                break;
+            }
+        }
+
+        // tmp_guard drops here on `continue`, removing the file.
+        if size_exceeded {
+            drop(tmp_guard);
+            continue;
+        }
+
+        if let Err(e) = tmp_file.flush().await {
+            warn!(error = %e, "failed to flush snapshot tmp file, trying next");
+            drop(tmp_guard);
+            continue;
+        }
+        drop(tmp_file);
+
+        info!(
+            size_bytes = total_bytes,
+            slot = info.slot,
+            "snapshot downloaded"
+        );
+
+        // 3. Verify SHA3-512 hash — mandatory (both fields required at collection time).
         let computed = hasher.finalize();
         let computed_b64 = computed.to_base64();
-        if &computed_b64 != expected_hash {
+        if computed_b64 != expected_hash {
             warn!(
                 expected = expected_hash,
                 computed = computed_b64,
-                "snapshot hash mismatch — discarding"
+                slot = info.slot,
+                "snapshot hash mismatch — discarding, trying next"
             );
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Ok(None);
+            drop(tmp_guard);
+            continue;
         }
-        info!("snapshot hash verified");
-    } else {
-        warn!("entrypoint did not provide file_hash — skipping verification");
+        info!(slot = info.slot, "snapshot hash verified");
+
+        // 4. Atomic rename .tmp → final destination.
+        let dest = snapshot_dir.join(format!("snapshot-{}.bin", info.slot));
+        let committed_tmp = tmp_guard.commit();
+        if let Err(e) = tokio::fs::rename(&committed_tmp, &dest).await {
+            warn!(error = %e, "failed to rename snapshot tmp file, trying next");
+            let _ = tokio::fs::remove_file(&committed_tmp).await;
+            continue;
+        }
+
+        info!(
+            path = %dest.display(),
+            slot = info.slot,
+            "snapshot saved to disk"
+        );
+
+        metrics::counter!("nusantara_snapshots_fetched").increment(1);
+
+        return Ok(Some(dest));
     }
 
-    // 4. Atomic rename .tmp → final destination
-    let dest = snapshot_dir.join(format!("snapshot-{}.bin", info.slot));
-    tokio::fs::rename(&tmp_path, &dest)
-        .await
-        .map_err(ValidatorError::Io)?;
-
-    info!(
-        path = %dest.display(),
-        slot = info.slot,
-        "snapshot saved to disk"
-    );
-
-    metrics::counter!("nusantara_snapshots_fetched").increment(1);
-
-    Ok(Some(dest))
+    Ok(None)
 }
 
 /// Derive an HTTP RPC base URL from an entrypoint gossip address.
@@ -237,5 +323,28 @@ mod tests {
     #[test]
     fn entrypoint_url_ipv6() {
         assert_eq!(entrypoint_to_rpc_url("[::1]:8000"), "http://[::1]:8899");
+    }
+
+    #[test]
+    fn tmp_file_guard_deletes_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.tmp");
+        std::fs::write(&path, b"data").unwrap();
+        assert!(path.exists());
+        let guard = TmpFileGuard::new(path.clone());
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn tmp_file_guard_keeps_on_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.tmp");
+        std::fs::write(&path, b"data").unwrap();
+        assert!(path.exists());
+        let guard = TmpFileGuard::new(path.clone());
+        let returned = guard.commit();
+        assert_eq!(returned, path);
+        assert!(path.exists());
     }
 }

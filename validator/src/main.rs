@@ -28,24 +28,27 @@ use crate::node::ValidatorNode;
 
 #[tokio::main]
 async fn main() {
-    // Install rustls CryptoProvider before any TLS/QUIC usage
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls CryptoProvider");
-
     let cli = Cli::parse();
 
     // --generate-keypair: create a keypair file and exit (no tracing needed)
     if let Some(ref path) = cli.generate_keypair {
         let kp = nusantara_crypto::Keypair::generate();
-        let mut bytes = Vec::with_capacity(64);
+        let mut bytes = Vec::with_capacity(crate::constants::KEYPAIR_SIZE);
         bytes.extend_from_slice(kp.public_key().as_bytes());
         bytes.extend_from_slice(kp.secret_key().as_bytes());
-        std::fs::write(path, &bytes).expect("failed to write keypair file");
+        // Write with 0o600 permissions so the secret key is not world-readable.
+        crate::identity::write_keypair_file(std::path::Path::new(path), &bytes)
+            .expect("failed to write keypair file");
         println!("Keypair generated: {path}");
         println!("Identity: {}", kp.address().to_base64());
         return;
     }
+
+    // Install rustls CryptoProvider before any TLS/QUIC usage.
+    // Skipped for --generate-keypair (no networking needed in that path).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
 
     // Initialize tracing
     tracing_subscriber::fmt()

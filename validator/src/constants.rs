@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use nusantara_consensus::leader_schedule::LeaderSchedule;
@@ -54,5 +53,17 @@ pub(crate) const PROGRAM_CACHE_SIZE: usize = 256;
 /// Milliseconds in a calendar year (365 days).
 pub(crate) const MS_PER_YEAR: u64 = 31_536_000_000;
 
-/// Shared leader schedule cache type.
-pub(crate) type SharedLeaderCache = Arc<parking_lot::RwLock<HashMap<u64, LeaderSchedule>>>;
+/// Maximum number of epochs retained in the leader schedule LRU cache.
+///
+/// 16 epochs is generous for any normal operation. Epochs older than this are
+/// evicted automatically; the cache is re-populated on demand from the
+/// LeaderScheduleGenerator when a cache miss occurs.
+pub(crate) const LEADER_CACHE_CAPACITY: usize = 16;
+
+/// Shared leader schedule cache — bounded LRU keyed by epoch number.
+///
+/// Uses `parking_lot::Mutex` (not RwLock) because LruCache requires `&mut self`
+/// even for reads (to update the recency order), making a read-write split
+/// impossible without an additional wrapper.
+pub(crate) type SharedLeaderCache =
+    Arc<parking_lot::Mutex<lru::LruCache<u64, LeaderSchedule>>>;

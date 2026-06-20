@@ -144,7 +144,11 @@ impl BlockProducer {
             batches: Vec::new(),
         };
 
-        // 11. Prepare pending block storage (deferred to async background)
+        // 11. Extract bank_hash before moving frozen into pending_storage so
+        // parent_bank_hash can be updated without cloning the full FrozenBankState.
+        let bank_hash = frozen.bank_hash;
+
+        // Prepare pending block storage (deferred to async background)
         let slot_meta = SlotMeta {
             slot,
             parent_slot: self.parent_slot,
@@ -154,10 +158,7 @@ impl BlockProducer {
             is_connected: true,
             completed: true,
         };
-        let pending_storage = PendingBlockStorage {
-            slot_meta,
-            frozen: frozen.clone(),
-        };
+        let pending_storage = PendingBlockStorage { slot_meta, frozen };
 
         // 12. Update consensus bank (in-memory only, fast)
         self.bank.record_slot_hash(slot, block_hash);
@@ -165,7 +166,7 @@ impl BlockProducer {
         // 13. Update parent pointers and reset PoH
         self.parent_slot = slot;
         self.parent_hash = block_hash;
-        self.parent_bank_hash = frozen.bank_hash;
+        self.parent_bank_hash = bank_hash;
         self.poh.reset(block_hash);
 
         // Metrics
@@ -199,28 +200,7 @@ impl BlockProducer {
         self.poh.reset(hash);
     }
 
-    #[allow(dead_code)]
     pub fn parent_slot(&self) -> u64 {
         self.parent_slot
-    }
-
-    #[allow(dead_code)]
-    pub fn fee_calculator(&self) -> &FeeCalculator {
-        &self.fee_calculator
-    }
-
-    #[allow(dead_code)]
-    pub fn rent(&self) -> &Rent {
-        &self.rent
-    }
-
-    #[allow(dead_code)]
-    pub fn epoch_schedule(&self) -> &EpochSchedule {
-        &self.epoch_schedule
-    }
-
-    #[allow(dead_code)]
-    pub fn bank(&self) -> &Arc<ConsensusBank> {
-        &self.bank
     }
 }
