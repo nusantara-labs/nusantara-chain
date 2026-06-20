@@ -2158,6 +2158,7 @@ dependencies = [
  "borsh",
  "dashmap",
  "hyper-util",
+ "lru 0.18.0",
  "metrics",
  "nusantara-compute-budget-program",
  "nusantara-consensus",

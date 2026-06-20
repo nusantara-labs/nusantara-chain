@@ -3,7 +3,11 @@
 // Routes incoming JSON-RPC method calls to the appropriate business logic,
 // reusing the same storage/bank/mempool layer as the REST handlers.
 // Supports both single and batch requests per the JSON-RPC 2.0 specification.
+//
+// Batch requests are processed concurrently via per-index `JoinHandle`s with
+// response ordering and panic recovery guaranteed per JSON-RPC 2.0 §6.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -17,23 +21,19 @@ use nusantara_core::lamports_to_nusa;
 use nusantara_crypto::Hash;
 use nusantara_storage::TransactionStatus;
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse,
-    METHOD_NOT_FOUND, PARSE_ERROR,
+    METHOD_NOT_FOUND, PARSE_ERROR, RESOURCE_NOT_FOUND,
 };
-use crate::server::RpcState;
-
-/// Maximum number of requests allowed in a single JSON-RPC batch.
-/// Batches exceeding this limit are rejected to prevent resource exhaustion.
-const MAX_BATCH_SIZE: usize = 100;
+use crate::server::{MAX_BATCH_SIZE, RpcState};
 
 // ---------------------------------------------------------------------------
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-/// Extract a string from a positional JSON array parameter.
 fn get_string_param(params: &Option<Value>, index: usize) -> Result<String, (i32, String)> {
     let arr = params
         .as_ref()
@@ -50,7 +50,6 @@ fn get_string_param(params: &Option<Value>, index: usize) -> Result<String, (i32
         })
 }
 
-/// Extract a u64 from a positional JSON array parameter.
 fn get_u64_param(params: &Option<Value>, index: usize) -> Result<u64, (i32, String)> {
     let arr = params
         .as_ref()
@@ -64,7 +63,6 @@ fn get_u64_param(params: &Option<Value>, index: usize) -> Result<u64, (i32, Stri
     })
 }
 
-/// Optionally extract a u64 from a positional JSON array parameter.
 fn get_optional_u64_param(params: &Option<Value>, index: usize) -> Option<u64> {
     params.as_ref()?.as_array()?.get(index)?.as_u64()
 }
@@ -75,9 +73,9 @@ fn get_optional_u64_param(params: &Option<Value>, index: usize) -> Option<u64> {
 
 /// Route a single method name + params to the matching handler.
 ///
-/// Returns `Ok(Value)` on success or `Err((code, message))` on error,
-/// which the caller translates into a `JsonRpcResponse`.
-async fn dispatch_method(
+/// Returns `Ok(Value)` on success or `Err((code, message))` on error.
+/// This is a synchronous function — no awaits needed by any current handler.
+fn dispatch_method(
     state: &RpcState,
     method: &str,
     params: &Option<Value>,
@@ -150,7 +148,7 @@ fn handle_get_account_info(
         .storage
         .get_account(&hash)
         .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-        .ok_or_else(|| (INVALID_PARAMS, format!("account not found: {addr_str}")))?;
+        .ok_or_else(|| (RESOURCE_NOT_FOUND, format!("account not found: {addr_str}")))?;
 
     Ok(serde_json::json!({
         "address": addr_str,
@@ -172,7 +170,7 @@ fn handle_get_balance(state: &RpcState, params: &Option<Value>) -> Result<Value,
         .storage
         .get_account(&hash)
         .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-        .ok_or_else(|| (INVALID_PARAMS, format!("account not found: {addr_str}")))?;
+        .ok_or_else(|| (RESOURCE_NOT_FOUND, format!("account not found: {addr_str}")))?;
 
     Ok(serde_json::json!({
         "value": account.lamports,
@@ -199,9 +197,21 @@ fn handle_send_transaction(
         .insert(tx.clone())
         .map_err(|e| (INTERNAL_ERROR, format!("mempool rejected transaction: {e}")))?;
 
-    // Forward via TPU path for leader routing (mirrors REST handler behavior)
+    // Forward via TPU path (fire-and-forget with logging on pressure).
     if let Some(fwd) = &state.tx_forward_sender {
-        let _ = fwd.try_send(tx);
+        match fwd.try_send(tx) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!("nusantara_rpc_tx_forward_dropped", "reason" => "full")
+                    .increment(1);
+                warn!(sig = %signature, "tpu forward channel full, tx in mempool only");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!("nusantara_rpc_tx_forward_dropped", "reason" => "closed")
+                    .increment(1);
+                warn!(sig = %signature, "tpu forward channel closed");
+            }
+        }
     }
 
     metrics::counter!("nusantara_rpc_jsonrpc_transactions_submitted").increment(1);
@@ -214,8 +224,8 @@ fn handle_get_transaction(
     params: &Option<Value>,
 ) -> Result<Value, (i32, String)> {
     let hash_str = get_string_param(params, 0)?;
-    let tx_hash =
-        Hash::from_base64(&hash_str).map_err(|e| (INVALID_PARAMS, format!("invalid hash: {e}")))?;
+    let tx_hash = Hash::from_base64(&hash_str)
+        .map_err(|e| (INVALID_PARAMS, format!("invalid hash: {e}")))?;
 
     let meta = match state
         .storage
@@ -224,7 +234,6 @@ fn handle_get_transaction(
     {
         Some(m) => m,
         None => {
-            // Check mempool for "received" status
             if state.mempool.contains(&tx_hash) {
                 return Ok(serde_json::json!({
                     "signature": hash_str,
@@ -237,7 +246,7 @@ fn handle_get_transaction(
                 }));
             }
             return Err((
-                INVALID_PARAMS,
+                RESOURCE_NOT_FOUND,
                 format!("transaction not found: {hash_str}"),
             ));
         }
@@ -266,7 +275,7 @@ fn handle_get_block(state: &RpcState, params: &Option<Value>) -> Result<Value, (
         .storage
         .get_block_header(slot)
         .map_err(|e| (INTERNAL_ERROR, e.to_string()))?
-        .ok_or_else(|| (INVALID_PARAMS, format!("block at slot {slot} not found")))?;
+        .ok_or_else(|| (RESOURCE_NOT_FOUND, format!("block at slot {slot} not found")))?;
 
     Ok(serde_json::json!({
         "slot": header.slot,
@@ -294,34 +303,58 @@ fn handle_get_epoch_info(state: &RpcState) -> Result<Value, (i32, String)> {
     }))
 }
 
+/// Validate that `epoch` is within the window we can serve accurately.
+///
+/// Only `[current_epoch.saturating_sub(2) ..= current_epoch + 2]` is
+/// supported because we do not snapshot stake distributions per epoch.
+fn validate_epoch_range(state: &RpcState, epoch: u64) -> Result<(), (i32, String)> {
+    let current = state.bank.current_epoch();
+    let lo = current.saturating_sub(2);
+    let hi = current + 2;
+    if epoch < lo || epoch > hi {
+        return Err((
+            INVALID_PARAMS,
+            format!(
+                "epoch {epoch} out of range: only [{lo}, {hi}] is supported \
+                 (historical stake distributions are not stored per epoch)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn handle_get_leader_schedule(
     state: &RpcState,
     params: &Option<Value>,
 ) -> Result<Value, (i32, String)> {
     let epoch = get_optional_u64_param(params, 0).unwrap_or_else(|| state.bank.current_epoch());
 
-    // Check cache first
-    if let Some(schedule) = state.leader_cache.read().get(&epoch) {
-        let first_slot = state.epoch_schedule.get_first_slot_in_epoch(epoch);
-        let entries: Vec<Value> = schedule
-            .slot_leaders
-            .iter()
-            .enumerate()
-            .map(|(i, leader)| {
-                serde_json::json!({
-                    "slot": first_slot + i as u64,
-                    "leader": leader.to_base64(),
+    validate_epoch_range(state, epoch)?;
+
+    // Check LRU cache first (Mutex, never held across await).
+    {
+        let mut cache = state.leader_cache.lock();
+        if let Some(schedule) = cache.get(&epoch) {
+            let first_slot = state.epoch_schedule.get_first_slot_in_epoch(epoch);
+            let entries: Vec<Value> = schedule
+                .slot_leaders
+                .iter()
+                .enumerate()
+                .map(|(i, leader)| {
+                    serde_json::json!({
+                        "slot": first_slot + i as u64,
+                        "leader": leader.to_base64(),
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        return Ok(serde_json::json!({
-            "epoch": epoch,
-            "schedule": entries,
-        }));
-    }
+            return Ok(serde_json::json!({
+                "epoch": epoch,
+                "schedule": entries,
+            }));
+        }
+    } // lock released here
 
-    // Compute on-demand
     let stakes = state.bank.get_stake_distribution();
     let schedule = state
         .leader_schedule_generator
@@ -346,8 +379,7 @@ fn handle_get_leader_schedule(
         })
         .collect();
 
-    // Cache for future use
-    state.leader_cache.write().insert(epoch, schedule);
+    state.leader_cache.lock().put(epoch, schedule);
 
     Ok(serde_json::json!({
         "epoch": epoch,
@@ -360,15 +392,13 @@ fn handle_get_vote_accounts(state: &RpcState) -> Result<Value, (i32, String)> {
     let stake_distribution = state.bank.get_stake_distribution();
     let total_active_stake = state.bank.total_active_stake();
 
+    // Build a O(1) lookup map from the stake distribution (F14).
+    let stake_map: HashMap<Hash, u64> = stake_distribution.into_iter().collect();
+
     let mut validators: Vec<Value> = vote_states
         .iter()
         .map(|(vote_account, vs)| {
-            let active_stake = stake_distribution
-                .iter()
-                .find(|(id, _)| *id == vs.node_pubkey)
-                .map(|(_, s)| *s)
-                .unwrap_or(0);
-
+            let active_stake = stake_map.get(&vs.node_pubkey).copied().unwrap_or(0);
             let last_vote = vs.votes.last().map(|l| l.slot);
 
             serde_json::json!({
@@ -382,7 +412,6 @@ fn handle_get_vote_accounts(state: &RpcState) -> Result<Value, (i32, String)> {
         })
         .collect();
 
-    // Sort by stake descending — the `active_stake` field is always present.
     validators.sort_by(|a, b| {
         let sa = a["active_stake"].as_u64().unwrap_or(0);
         let sb = b["active_stake"].as_u64().unwrap_or(0);
@@ -434,34 +463,63 @@ fn handle_get_program_accounts(
 // Top-level handler
 // ---------------------------------------------------------------------------
 
-/// Process a single JSON-RPC request value that has already been parsed.
-async fn process_single_request(state: &RpcState, value: &Value) -> JsonRpcResponse {
-    let req: JsonRpcRequest = match serde_json::from_value(value.clone()) {
+/// Process a single JSON-RPC request value.
+///
+/// Returns `Some(JsonRpcResponse)` for normal requests and `None` for
+/// notifications (requests without an `id` field), which per JSON-RPC 2.0
+/// must not receive a response (F12).
+fn process_single_request(state: &RpcState, value: Value) -> Option<JsonRpcResponse> {
+    let req: JsonRpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(_) => {
-            return JsonRpcResponse::error(
+            return Some(JsonRpcResponse::error(
                 Value::Null,
                 INVALID_REQUEST,
                 "invalid request object".to_string(),
-            );
+            ));
         }
     };
 
+    // Notifications (no id) must not receive a response.
+    let is_notification = req.id.is_none();
     let id = req.id.unwrap_or(Value::Null);
 
     if req.jsonrpc != "2.0" {
-        return JsonRpcResponse::error(id, INVALID_REQUEST, "jsonrpc must be \"2.0\"".to_string());
+        if is_notification {
+            return None;
+        }
+        return Some(JsonRpcResponse::error(
+            id,
+            INVALID_REQUEST,
+            "jsonrpc must be \"2.0\"".to_string(),
+        ));
     }
 
     debug!(method = %req.method, "JSON-RPC dispatch");
 
-    match dispatch_method(state, &req.method, &req.params).await {
-        Ok(result) => JsonRpcResponse::success(id, result),
+    let result = dispatch_method(state, &req.method, &req.params);
+
+    if is_notification {
+        // Fire-and-forget: execute the method but do not reply.
+        if let Err((code, message)) = result
+            && code == INTERNAL_ERROR
+        {
+            warn!(
+                method = %req.method,
+                error = %message,
+                "JSON-RPC notification internal error"
+            );
+        }
+        return None;
+    }
+
+    match result {
+        Ok(value) => Some(JsonRpcResponse::success(id, value)),
         Err((code, message)) => {
             if code == INTERNAL_ERROR {
                 warn!(method = %req.method, error = %message, "JSON-RPC internal error");
             }
-            JsonRpcResponse::error(id, code, message)
+            Some(JsonRpcResponse::error(id, code, message))
         }
     }
 }
@@ -469,9 +527,15 @@ async fn process_single_request(state: &RpcState, value: &Value) -> JsonRpcRespo
 /// Axum handler for `POST /rpc`.
 ///
 /// Accepts a raw `Json<Value>` so that we can distinguish between:
-/// - a single JSON object (single request)
+/// - a single JSON object (single request or notification)
 /// - a JSON array (batch request)
 /// - anything else (parse error)
+///
+/// Batch requests are processed concurrently; response order matches request
+/// order (per JSON-RPC 2.0 spec).
+///
+/// If all items in a batch are notifications, HTTP 204 No Content is returned.
+/// Single notifications also return HTTP 204.
 #[tracing::instrument(skip_all, name = "jsonrpc_handler")]
 pub async fn handle_jsonrpc(
     State(state): State<Arc<RpcState>>,
@@ -479,7 +543,7 @@ pub async fn handle_jsonrpc(
 ) -> impl IntoResponse {
     metrics::counter!("nusantara_rpc_jsonrpc_requests").increment(1);
 
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body.as_array().cloned() {
         // Batch request
         if arr.is_empty() {
             return (
@@ -496,7 +560,6 @@ pub async fn handle_jsonrpc(
                 .into_response();
         }
 
-        // Reject oversized batches to prevent resource exhaustion.
         if arr.len() > MAX_BATCH_SIZE {
             warn!(
                 batch_size = arr.len(),
@@ -521,14 +584,56 @@ pub async fn handle_jsonrpc(
                 .into_response();
         }
 
-        let mut responses = Vec::with_capacity(arr.len());
-        for item in arr {
-            let resp = process_single_request(&state, item).await;
-            responses.push(resp);
+        // Process batch concurrently, preserving order and ensuring every
+        // non-notification request gets a response even when a task panics
+        // (JSON-RPC 2.0 §6).
+        let n = arr.len();
+        // Use (idx, JoinHandle) so a panic recovery can fill the correct slot.
+        let mut handles: Vec<(usize, tokio::task::JoinHandle<Option<JsonRpcResponse>>)> =
+            Vec::with_capacity(n);
+        for (idx, item) in arr.into_iter().enumerate() {
+            let state = Arc::clone(&state);
+            handles.push((
+                idx,
+                tokio::spawn(async move { process_single_request(&state, item) }),
+            ));
         }
+
+        // Slots are pre-allocated so each index can be filled independently.
+        // `JsonRpcResponse` is not Clone, so use `repeat_with` instead of `vec![None; n]`.
+        let mut slots: Vec<Option<JsonRpcResponse>> =
+            std::iter::repeat_with(|| None).take(n).collect();
+        for (idx, handle) in handles {
+            match handle.await {
+                Ok(opt) => slots[idx] = opt,
+                Err(e) if e.is_panic() => {
+                    tracing::error!(idx, error = %e, "JSON-RPC batch task panicked");
+                    slots[idx] = Some(JsonRpcResponse::error(
+                        Value::Null,
+                        INTERNAL_ERROR,
+                        "internal error".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(idx, error = %e, "JSON-RPC batch task join error");
+                    slots[idx] = Some(JsonRpcResponse::error(
+                        Value::Null,
+                        INTERNAL_ERROR,
+                        "internal error".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let responses: Vec<JsonRpcResponse> = slots.into_iter().flatten().collect();
 
         metrics::counter!("nusantara_rpc_jsonrpc_batch_requests").increment(1);
         metrics::histogram!("nusantara_rpc_jsonrpc_batch_size").record(responses.len() as f64);
+
+        if responses.is_empty() {
+            // All items were notifications — return no body per spec.
+            return StatusCode::NO_CONTENT.into_response();
+        }
 
         (
             StatusCode::OK,
@@ -539,15 +644,20 @@ pub async fn handle_jsonrpc(
         )
             .into_response()
     } else if body.is_object() {
-        // Single request
-        let resp = process_single_request(&state, &body).await;
-        (
-            StatusCode::OK,
-            Json(serde_json::to_value(resp).expect("JsonRpcResponse serialization cannot fail")),
-        )
-            .into_response()
+        // Single request or notification
+        match process_single_request(&state, body) {
+            Some(resp) => (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(resp)
+                        .expect("JsonRpcResponse serialization cannot fail"),
+                ),
+            )
+                .into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        }
     } else {
-        // Neither object nor array — invalid
+        // Neither object nor array — parse error
         (
             StatusCode::OK,
             Json(
@@ -630,9 +740,6 @@ mod tests {
 
     #[test]
     fn process_request_invalid_json_structure() {
-        // Simulate what happens when the request object is missing required fields.
-        // `process_single_request` would return INVALID_REQUEST before touching
-        // state because JsonRpcRequest deserialization fails (missing fields).
         let value = serde_json::json!({"not": "valid"});
         let result: Result<JsonRpcRequest, _> = serde_json::from_value(value);
         assert!(result.is_err());
@@ -675,8 +782,6 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_method_error_code() {
-        // We cannot construct RpcState without full infrastructure, but we can
-        // verify the method-not-found error code constant is correct per spec.
         assert_eq!(METHOD_NOT_FOUND, -32601);
     }
 
@@ -686,9 +791,12 @@ mod tests {
     }
 
     #[test]
+    fn resource_not_found_error_code() {
+        assert_eq!(RESOURCE_NOT_FOUND, -32004);
+    }
+
+    #[test]
     fn batch_within_limit_is_accepted() {
-        // A batch with exactly MAX_BATCH_SIZE items should be accepted
-        // (not exceed the limit). We test the condition, not the full handler.
         let items: Vec<Value> = (0..MAX_BATCH_SIZE)
             .map(|i| {
                 serde_json::json!({
@@ -712,7 +820,17 @@ mod tests {
                 })
             })
             .collect();
-        // 101 items exceeds the 100 limit
         assert!(items.len() > MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn notification_has_no_id() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notify",
+            "params": [1]
+        });
+        let req: JsonRpcRequest = serde_json::from_value(json).unwrap();
+        assert!(req.id.is_none());
     }
 }

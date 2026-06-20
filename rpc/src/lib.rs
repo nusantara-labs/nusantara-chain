@@ -1,10 +1,12 @@
 pub mod error;
 pub mod handlers;
 pub mod jsonrpc;
-pub mod rate_limiter;
+pub(crate) mod rate_limiter;
 pub mod server;
 pub mod types;
 
 pub use error::RpcError;
-pub use rate_limiter::{RpcRateLimitLayer, RpcRateLimiter};
-pub use server::{PubsubEvent, RpcServer, RpcState, RpcTlsConfig, SharedLeaderCache};
+pub use server::{
+    CachedSnapshotInfo, PubsubEvent, RpcState, RpcTlsConfig, SharedLeaderCache,
+    new_leader_cache, router, serve,
+};

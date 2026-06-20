@@ -2,6 +2,7 @@
 name = "nusantara-rpc"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 nusantara-crypto.workspace = true
@@ -24,6 +25,7 @@ tracing.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
+lru.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 axum.workspace = true

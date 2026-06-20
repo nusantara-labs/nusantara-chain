@@ -7,7 +7,7 @@ use nusantara_consensus::leader_schedule::LeaderScheduleGenerator;
 use nusantara_core::Transaction;
 use nusantara_crypto::Hash;
 use nusantara_gossip::GossipService;
-use nusantara_rpc::{RpcServer, RpcState, RpcTlsConfig};
+use nusantara_rpc::{RpcState, RpcTlsConfig, serve as rpc_serve};
 use nusantara_tpu_forward::TpuService;
 use nusantara_turbine::protocol::{MAX_UDP_PACKET, RepairRequest};
 use nusantara_turbine::repair_service::MAX_REPAIR_BATCH_REQUEST;
@@ -277,11 +277,14 @@ impl ValidatorNode {
             None
         };
 
+        let (faucet_address_cooldowns, faucet_ip_cooldowns) =
+            RpcState::new_faucet_cooldown_maps();
+
         let rpc_state = Arc::new(RpcState {
             storage: Arc::clone(&self.storage),
             bank: Arc::clone(&self.bank),
             mempool: Arc::clone(&self.mempool),
-            leader_cache: Arc::clone(&self.leader_cache),
+            leader_cache: nusantara_rpc::server::new_leader_cache(),
             leader_schedule_generator: LeaderScheduleGenerator::new(self.epoch_schedule.clone()),
             epoch_schedule: self.epoch_schedule.clone(),
             genesis_hash: self.genesis_hash,
@@ -293,14 +296,23 @@ impl ValidatorNode {
             pubsub_tx: self.pubsub_tx.clone(),
             snapshot_dir: Path::new(&cli.ledger_path).join("snapshots"),
             ws_semaphore: RpcState::new_ws_semaphore(),
-            faucet_address_cooldowns: Default::default(),
-            faucet_ip_cooldowns: Default::default(),
+            faucet_address_cooldowns: Arc::clone(&faucet_address_cooldowns),
+            faucet_ip_cooldowns: Arc::clone(&faucet_ip_cooldowns),
+            snapshot_cache: RpcState::new_snapshot_cache(),
         });
+
+        // Spawn the faucet janitor to purge expired cooldown entries.
+        RpcState::spawn_faucet_janitor(
+            faucet_address_cooldowns,
+            faucet_ip_cooldowns,
+            shutdown_rx.clone(),
+        );
 
         // Build optional TLS config from CLI flags
         let rpc_tls = match (&cli.rpc_tls_cert, &cli.rpc_tls_key) {
             (Some(cert_path), Some(key_path)) => {
                 let tls = RpcTlsConfig::from_pem_files(Path::new(cert_path), Path::new(key_path))
+                    .await
                     .map_err(|e| ValidatorError::NetworkInit(format!("RPC TLS init: {e}")))?;
                 info!(cert = cert_path, key = key_path, "RPC TLS enabled");
                 Some(tls)
@@ -315,7 +327,7 @@ impl ValidatorNode {
 
         let rpc_shutdown = shutdown_rx.clone();
         service_tasks.spawn(async move {
-            RpcServer::serve(rpc_addr, rpc_state, rpc_tls, rpc_shutdown).await;
+            rpc_serve(rpc_addr, rpc_state, rpc_tls, rpc_shutdown).await;
             "rpc"
         });
         info!(addr = %rpc_addr, "RPC server started");

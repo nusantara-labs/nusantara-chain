@@ -35,7 +35,7 @@ pub async fn get_signatures(
     let hash = Hash::from_base64(&address)
         .map_err(|e| RpcError::BadRequest(format!("invalid address: {e}")))?;
 
-    let limit = query.limit.unwrap_or(20).min(1000);
+    let limit = crate::handlers::clamp_limit(query.limit, 20, 1000);
     let sigs = state.storage.get_signatures_for_address(&hash, limit)?;
 
     let signatures: Vec<SignatureEntry> = sigs

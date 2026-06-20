@@ -13,6 +13,15 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 
+/// Implementation-defined server error code (-32099..=-32000 reserved sub-band).
+///
+/// `RESOURCE_NOT_FOUND` is used for "not found" responses (accounts, blocks,
+/// transactions) to distinguish them from `INVALID_PARAMS` which implies a
+/// malformed request rather than a missing resource.
+/// Value -32004 falls within the implementation-defined range reserved by the
+/// JSON-RPC 2.0 spec (-32099 to -32000 inclusive).
+pub const RESOURCE_NOT_FOUND: i32 = -32004;
+
 /// A JSON-RPC 2.0 request object.
 ///
 /// The `id` field is optional for notifications (which the server does not

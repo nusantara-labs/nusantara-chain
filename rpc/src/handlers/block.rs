@@ -64,30 +64,38 @@ pub async fn get_block_transactions(
         .get_block(slot)?
         .ok_or_else(|| RpcError::NotFound(format!("block at slot {slot} not found")))?;
 
-    let mut entries = Vec::with_capacity(block.transactions.len());
+    // Clone Arc<Storage> so the closure can own it (F16).
+    let storage = Arc::clone(&state.storage);
 
-    for (idx, tx) in block.transactions.iter().enumerate() {
-        let tx_hash = tx.hash();
-        let (status, fee, compute_units) =
-            match state.storage.get_transaction_status(&tx_hash)? {
-                Some(meta) => {
-                    let status_str = match meta.status {
-                        TransactionStatus::Success => "success".to_string(),
-                        TransactionStatus::Failed(msg) => format!("failed: {msg}"),
-                    };
-                    (status_str, meta.fee, meta.compute_units_consumed)
-                }
-                None => ("unknown".to_string(), 0, 0),
-            };
+    let entries = tokio::task::spawn_blocking(move || {
+        let mut entries = Vec::with_capacity(block.transactions.len());
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            let tx_hash = tx.hash();
+            let (status, fee, compute_units) =
+                match storage.get_transaction_status(&tx_hash)? {
+                    Some(meta) => {
+                        let status_str = match meta.status {
+                            TransactionStatus::Success => "success".to_string(),
+                            TransactionStatus::Failed(msg) => format!("failed: {msg}"),
+                        };
+                        (status_str, meta.fee, meta.compute_units_consumed)
+                    }
+                    None => ("unknown".to_string(), 0, 0),
+                };
 
-        entries.push(BlockTransactionEntry {
-            signature: tx_hash.to_base64(),
-            tx_index: idx as u32,
-            status,
-            fee,
-            compute_units_consumed: compute_units,
-        });
-    }
+            entries.push(BlockTransactionEntry {
+                signature: tx_hash.to_base64(),
+                tx_index: idx as u32,
+                status,
+                fee,
+                compute_units_consumed: compute_units,
+            });
+        }
+        Ok::<_, nusantara_storage::StorageError>(entries)
+    })
+    .await
+    .map_err(|e| RpcError::Internal(format!("block tx task panicked: {e}")))?
+    .map_err(RpcError::Storage)?;
 
     Ok(Json(BlockTransactionsResponse {
         slot,

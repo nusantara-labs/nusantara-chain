@@ -59,7 +59,7 @@ pub async fn get_accounts_by_owner(
     let owner_hash = Hash::from_base64(&owner)
         .map_err(|e| RpcError::BadRequest(format!("invalid owner address: {e}")))?;
 
-    let limit = query.limit.unwrap_or(100).min(1000);
+    let limit = crate::handlers::clamp_limit(query.limit, 100, 1000);
 
     let accounts = state
         .storage
@@ -107,7 +107,7 @@ pub async fn get_accounts_by_program(
     let program_hash = Hash::from_base64(&program)
         .map_err(|e| RpcError::BadRequest(format!("invalid program address: {e}")))?;
 
-    let limit = query.limit.unwrap_or(100).min(1000);
+    let limit = crate::handlers::clamp_limit(query.limit, 100, 1000);
 
     let accounts = state
         .storage

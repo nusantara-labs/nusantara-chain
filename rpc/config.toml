@@ -1,0 +1,34 @@
+[pubsub]
+channel_capacity = 4096
+
+[ws]
+max_connections = 1000
+max_subscriptions_per_conn = 10000
+send_timeout_secs = 5
+
+[faucet]
+cooldown_per_address_secs = 60
+cooldown_per_ip_secs = 10
+max_airdrop_lamports = 10000000000
+janitor_interval_secs = 60
+
+[rate_limiter]
+max_requests_per_second_per_ip = 100
+max_requests_per_second_global = 50000
+cleanup_interval_secs = 60
+stale_entry_timeout_secs = 120
+
+[jsonrpc]
+max_batch_size = 100
+
+[transaction]
+max_confirm_timeout_ms = 30000
+
+[health]
+behind_slots_threshold = 100
+
+[leader_cache]
+capacity = 16
+
+[snapshot_cache]
+capacity = 4

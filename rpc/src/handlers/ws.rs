@@ -7,9 +7,22 @@
 //! **Unsubscribe**: `{"method": "slotUnsubscribe"}` or `{"method": "blockUnsubscribe"}`
 //!
 //! Events are delivered as JSON objects with a `"type"` discriminator field.
+//!
+//! Design notes:
+//! - `WsConnGuard` (F20): RAII guard that decrements the active-connections
+//!   gauge on drop, even if the handler panics.
+//! - Send timeout (F9): every `socket.send` is wrapped in
+//!   `tokio::time::timeout(WS_SEND_TIMEOUT)`. Timeout → warn + close.
+//! - Consecutive lags (F9): two consecutive `Lagged` errors close the connection.
+//! - Serialization (F19): events are serialized per-subscriber from the shared
+//!   `PubsubEvent`. Moving to a pre-serialized `Arc<String>` broadcast would
+//!   require changing `RpcState::pubsub_tx`'s channel type which is a
+//!   validator-side coordination change; the per-subscriber serialization cost
+//!   is acceptable for the current subscriber cardinality.
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
@@ -19,7 +32,29 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::{debug, instrument, warn};
 
-use crate::server::{MAX_SUBSCRIPTIONS_PER_CONN, PubsubEvent, RpcState};
+use crate::server::{MAX_SUBSCRIPTIONS_PER_CONN, PubsubEvent, RpcState, WS_SEND_TIMEOUT_SECS};
+
+/// WebSocket send timeout derived from build-time config.
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(WS_SEND_TIMEOUT_SECS);
+
+// ---------------------------------------------------------------------------
+// RAII gauge guard (F20)
+// ---------------------------------------------------------------------------
+
+/// Decrements the `nusantara_rpc_ws_active_connections` gauge on drop.
+/// Constructed after the gauge is incremented; dropping it — even on panic —
+/// keeps the metric accurate.
+struct WsConnGuard;
+
+impl Drop for WsConnGuard {
+    fn drop(&mut self) {
+        metrics::gauge!("nusantara_rpc_ws_active_connections").decrement(1.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Subscription state
+// ---------------------------------------------------------------------------
 
 /// Tracks which event types a client has subscribed to.
 #[derive(Debug, Default)]
@@ -30,12 +65,10 @@ struct Subscriptions {
 }
 
 impl Subscriptions {
-    /// Returns `true` if at least one subscription is active.
     fn has_any(&self) -> bool {
         self.slot || self.block || !self.signatures.is_empty()
     }
 
-    /// Returns the total number of active subscriptions.
     fn count(&self) -> usize {
         let mut n = self.signatures.len();
         if self.slot {
@@ -47,7 +80,6 @@ impl Subscriptions {
         n
     }
 
-    /// Returns `true` if this event matches an active subscription.
     fn matches(&self, event: &PubsubEvent) -> bool {
         match event {
             PubsubEvent::SlotUpdate { .. } => self.slot,
@@ -59,13 +91,15 @@ impl Subscriptions {
     }
 }
 
-/// Optional parameters for subscription requests (e.g. signatureSubscribe).
+// ---------------------------------------------------------------------------
+// Client request types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize, Default)]
 struct SignatureParams {
     signature: String,
 }
 
-/// Inbound message from the WebSocket client.
 #[derive(Debug, Deserialize)]
 struct ClientRequest {
     method: String,
@@ -73,14 +107,14 @@ struct ClientRequest {
     params: Option<SignatureParams>,
 }
 
+// ---------------------------------------------------------------------------
+// Upgrade handler
+// ---------------------------------------------------------------------------
+
 /// Axum handler that upgrades an HTTP request to a WebSocket connection.
 ///
-/// Once upgraded, the connection enters `handle_socket` which manages
-/// subscriptions and event delivery for the lifetime of the connection.
-///
-/// The handler acquires a permit from `RpcState::ws_semaphore` before
-/// upgrading. If all permits are taken (i.e. `MAX_WS_CONNECTIONS` are
-/// active), the request is rejected with 503 Service Unavailable.
+/// Acquires a permit from `RpcState::ws_semaphore` before upgrading.
+/// If the limit is reached, returns 503 Service Unavailable.
 #[instrument(skip_all)]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -88,9 +122,8 @@ pub async fn ws_handler(
 ) -> impl IntoResponse {
     metrics::counter!("nusantara_rpc_ws_upgrades").increment(1);
 
-    // Try to acquire a WebSocket connection permit (non-blocking).
     let permit = match state.ws_semaphore.clone().try_acquire_owned() {
-        Ok(permit) => permit,
+        Ok(p) => p,
         Err(_) => {
             warn!("WebSocket connection limit reached, rejecting upgrade");
             metrics::counter!("nusantara_rpc_ws_rejected_limit").increment(1);
@@ -106,20 +139,19 @@ pub async fn ws_handler(
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// Session loop
+// ---------------------------------------------------------------------------
+
 /// Core WebSocket session loop.
 ///
 /// Architecture:
-/// - A `broadcast::Receiver` is created from `RpcState::pubsub_tx` at the
-///   start of each connection. This means the receiver only sees events
-///   published *after* the connection was established -- no backfill.
-/// - We use `tokio::select!` to concurrently read client messages (subscribe /
-///   unsubscribe) and receive broadcast events. The `biased` mode is not used
-///   here because both branches are equally important and we want fair polling.
-/// - If the broadcast receiver lags (buffer overflow), we log a warning and
-///   continue -- the client simply misses those events.
-/// - The loop exits when the client disconnects or sends a Close frame.
-/// - The `_permit` is held for the duration of the connection. When the
-///   function returns, the permit is dropped, freeing a slot in the semaphore.
+/// - A `broadcast::Receiver<PubsubPayload>` is subscribed at connection start.
+///   Events published before connection are not backfilled.
+/// - `tokio::select!` concurrently polls client messages and broadcast events.
+/// - Each send is wrapped in a `WS_SEND_TIMEOUT` timeout.
+/// - Two consecutive `Lagged` errors close the connection.
+/// - A `WsConnGuard` ensures the active-connections gauge is decremented on exit.
 #[instrument(skip_all)]
 async fn handle_socket(
     mut socket: WebSocket,
@@ -127,14 +159,16 @@ async fn handle_socket(
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     metrics::gauge!("nusantara_rpc_ws_active_connections").increment(1.0);
+    let _guard = WsConnGuard; // decrements gauge on drop (F20)
     debug!("WebSocket client connected");
 
     let mut event_rx: broadcast::Receiver<PubsubEvent> = state.pubsub_tx.subscribe();
     let mut subs = Subscriptions::default();
+    let mut consecutive_lags: u32 = 0;
 
     loop {
         tokio::select! {
-            // Branch 1: Incoming message from the client
+            // Branch 1: Incoming message from the client.
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -145,13 +179,18 @@ async fn handle_socket(
                         break;
                     }
                     Some(Ok(Message::Ping(data))) => {
-                        // Respond with Pong to keep the connection alive
-                        if socket.send(Message::Pong(data)).await.is_err() {
-                            break;
+                        let send_result = tokio::time::timeout(
+                            WS_SEND_TIMEOUT,
+                            socket.send(Message::Pong(data)),
+                        )
+                        .await;
+                        match send_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) | Err(_) => break,
                         }
                     }
                     Some(Ok(_)) => {
-                        // Ignore Binary / Pong frames
+                        // Ignore Binary / Pong frames.
                     }
                     Some(Err(e)) => {
                         warn!(error = %e, "WebSocket receive error");
@@ -159,30 +198,48 @@ async fn handle_socket(
                     }
                 }
             }
-            // Branch 2: Broadcast event from the validator
+            // Branch 2: Broadcast event from the validator.
             event = event_rx.recv() => {
                 match event {
                     Ok(ev) if subs.matches(&ev) => {
-                        // Auto-unsubscribe after delivering a SignatureNotification
-                        // (one-shot subscription pattern to prevent memory leaks)
-                        let auto_unsub_sig = if let PubsubEvent::SignatureNotification { ref signature, .. } = ev {
+                        consecutive_lags = 0;
+
+                        // Auto-unsubscribe after SignatureNotification delivery.
+                        let auto_unsub_sig = if let PubsubEvent::SignatureNotification {
+                            ref signature, ..
+                        } = ev
+                        {
                             Some(signature.clone())
                         } else {
                             None
                         };
 
-                        // Serialize and send only if the client is subscribed
+                        // Serialize the event (each subscriber serializes its own copy).
                         match serde_json::to_string(&ev) {
                             Ok(json) => {
-                                if socket.send(Message::Text(json.into())).await.is_err() {
-                                    debug!("WebSocket send failed, closing");
-                                    break;
-                                }
-                                metrics::counter!("nusantara_rpc_ws_events_sent").increment(1);
-
-                                // Remove the signature after successful delivery
-                                if let Some(sig) = auto_unsub_sig {
-                                    subs.signatures.remove(&sig);
+                                let send_result = tokio::time::timeout(
+                                    WS_SEND_TIMEOUT,
+                                    socket.send(Message::Text(json.into())),
+                                )
+                                .await;
+                                match send_result {
+                                    Ok(Ok(())) => {
+                                        metrics::counter!("nusantara_rpc_ws_events_sent")
+                                            .increment(1);
+                                        if let Some(sig) = auto_unsub_sig {
+                                            subs.signatures.remove(&sig);
+                                        }
+                                    }
+                                    Ok(Err(_)) => {
+                                        debug!("WebSocket send failed, closing");
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        warn!("WebSocket send timed out, closing connection");
+                                        metrics::counter!("nusantara_rpc_ws_send_timeout")
+                                            .increment(1);
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -191,11 +248,22 @@ async fn handle_socket(
                         }
                     }
                     Ok(_) => {
-                        // Event does not match any active subscription -- skip
+                        consecutive_lags = 0;
+                        // Event does not match any active subscription.
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(missed = n, "WebSocket subscriber lagged, events dropped");
+                        consecutive_lags += 1;
+                        warn!(
+                            missed = n,
+                            consecutive_lags,
+                            "WebSocket subscriber lagged, events dropped"
+                        );
                         metrics::counter!("nusantara_rpc_ws_events_lagged").increment(n);
+                        // Drop the connection on second consecutive lag (F9).
+                        if consecutive_lags >= 2 {
+                            warn!("closing WebSocket: lagged twice consecutively");
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         debug!("pubsub channel closed, terminating WebSocket");
@@ -206,22 +274,24 @@ async fn handle_socket(
         }
     }
 
-    metrics::gauge!("nusantara_rpc_ws_active_connections").decrement(1.0);
     debug!("WebSocket session ended");
+    // _guard drops here → gauge decremented.
 }
 
-/// Parse and apply a client subscription / unsubscription request.
-///
-/// Sends a JSON acknowledgement back to the client so it knows the request
-/// was processed. Invalid methods receive an error response.
+// ---------------------------------------------------------------------------
+// Client message handling
+// ---------------------------------------------------------------------------
+
 async fn handle_client_message(text: &str, subs: &mut Subscriptions, socket: &mut WebSocket) {
     let req: ClientRequest = match serde_json::from_str(text) {
         Ok(r) => r,
         Err(e) => {
-            let err_msg = serde_json::json!({
-                "error": format!("invalid request: {e}")
-            });
-            let _ = socket.send(Message::Text(err_msg.to_string().into())).await;
+            let err_msg = serde_json::json!({"error": format!("invalid request: {e}")});
+            let _ = tokio::time::timeout(
+                WS_SEND_TIMEOUT,
+                socket.send(Message::Text(err_msg.to_string().into())),
+            )
+            .await;
             return;
         }
     };
@@ -319,12 +389,21 @@ async fn handle_client_message(text: &str, subs: &mut Subscriptions, socket: &mu
     };
 
     if recognized {
-        metrics::counter!("nusantara_rpc_ws_subscriptions", "method" => req.method.clone()).increment(1);
+        metrics::counter!("nusantara_rpc_ws_subscriptions", "method" => req.method.clone())
+            .increment(1);
         debug!(method = %req.method, active = subs.has_any(), "subscription updated");
     }
 
-    let _ = socket.send(Message::Text(ack.to_string().into())).await;
+    let _ = tokio::time::timeout(
+        WS_SEND_TIMEOUT,
+        socket.send(Message::Text(ack.to_string().into())),
+    )
+    .await;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -455,7 +534,6 @@ mod tests {
             slot: 5,
             status: "success".to_string(),
         }));
-        // Slot/block should not match
         assert!(!subs.matches(&PubsubEvent::SlotUpdate {
             slot: 1,
             parent: 0,
@@ -486,7 +564,8 @@ mod tests {
 
     #[test]
     fn client_request_with_params_deserializes() {
-        let raw = r#"{"method": "signatureSubscribe", "params": {"signature": "abc123"}}"#;
+        let raw =
+            r#"{"method": "signatureSubscribe", "params": {"signature": "abc123"}}"#;
         let req: ClientRequest = serde_json::from_str(raw).expect("parse");
         assert_eq!(req.method, "signatureSubscribe");
         assert_eq!(req.params.as_ref().unwrap().signature, "abc123");
@@ -540,5 +619,10 @@ mod tests {
         subs.signatures.insert("sig1".to_string());
         subs.signatures.insert("sig2".to_string());
         assert_eq!(subs.count(), 3);
+    }
+
+    #[test]
+    fn ws_send_timeout_positive() {
+        assert!(WS_SEND_TIMEOUT.as_secs() > 0);
     }
 }
